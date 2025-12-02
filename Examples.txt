@@ -1,0 +1,512 @@
+style_video:
+docker compose run --rm \
+  -e IN_VID=/app/input/myclip.mp4 \
+  -e OUT_DIR=/app/output \
+  -e FPS=24 \
+  -e SCALE=720 \
+  style bash -lc 'bash /app/run_styles.sh'
+
+
+
+style individual pics
+
+docker compose run --rm \
+  -e DEBUG=1 -e PRESET=fast -e CRF=22 -e FPS=20 -e SCALE=720 -e IMG_Q=88 \
+  -e TRANS=2.5 -e HOLD_MODEL=0.1 -e HOLD_ORIG_START=0.1 -e HOLD_ORIG_END=0.1 \
+  -e MAX_MODELS=5 -e RANDOMIZE_MODELS=1 -e MAX_COMBOS=5 -e RANDOMIZE_COMBOS=1 \
+  style
+
+
+
+
+  docker compose run --rm \
+  -e IN_VID=/app/input/myclip.mp4 \
+  -e OUT_DIR=/app/output \
+  -e FPS=24 \
+  -e SCALE=720 \
+  -e max_frames=10 \
+  style bash -lc 'bash /app/run_styles.sh'
+
+
+
+  docker compose run --rm \
+  -e IN_DIR=/app/input_videos \
+  -e OUT_DIR=/app/output \
+  -e PYTORCH_DIR=/app/models/pytorch \
+  -e SCALE=720 -e FPS=24 -e PRE_FPS=1 \
+  -e IO_PRESET_A=imagenet_01 -e IO_PRESET_B=imagenet_01 \
+  -e RANDOM_ALPHA=1 -e BLEND=1.0 \
+  -e SMOOTH_LIGHTNESS=1 -e SMOOTH_ALPHA=0.85 \
+  -e FLOW_EMA=0 \
+  style bash -lc 'python /app/run_videos.py'
+
+
+
+
+
+
+
+  docker compose run --rm \
+  -e IN_DIR=/app/input_videos \
+  -e OUT_DIR=/app/output \
+  -e PYTORCH_DIR=/app/models/pytorch \
+  -e SCALE=720 -e FPS=24 -e PRE_FPS=15 \
+  -e RANDOM_ALPHA=1 -e BLEND=1.0 \
+  -e SMOOTH_LIGHTNESS=1 -e SMOOTH_ALPHA=0.85 \
+  -e FLOW_EMA=0 \
+  style bash -lc 'python /app/run_videos.py'
+
+
+
+  2 model blend
+
+  docker compose run --rm   -e IN_DIR=/app/input_videos   -e OUT_DIR=/app/output   -e PYTORCH_DIR=/app/models/pytorch   -e SCALE=720 -e FPS=24 -e PRE_FPS=15   -e RANDOM_ALPHA=1 -e BLEND=0.9   -e SMOOTH_LIGHTNESS=1 -e SMOOTH_ALPHA=0.85   -e FLOW_EMA=0   style bash -lc 'python /app/run_videos.py'
+
+
+
+
+docker compose run --rm \
+  -e IN_DIR=/app/input_videos \
+  -e OUT_DIR=/app/output \
+  -e PYTORCH_DIR=/app/models/pytorch \
+  -e SCALE=720 \
+  -e FPS=24 \
+  -e PRE_FPS=15 \
+  -e MODEL_A=candy.pth \
+  -e MODEL_B=mosaic.pth \
+  -e MODEL_C=rain_princess.pth \
+  -e MODEL_D=udnie.pth \
+  -e USE_B=1 \
+  -e USE_C=1 \
+  -e USE_D=1 \
+  -e RANDOM_WEIGHTS=1 \
+  -e BLEND=0.9 \
+  -e SMOOTH_LIGHTNESS=1 \
+  -e SMOOTH_ALPHA=0.85 \
+  -e FLOW_EMA=0 \
+  -e IO_PRESET_A=imagenet_255 \
+  -e IO_PRESET_B=imagenet_255 \
+  -e IO_PRESET_C=imagenet_255 \
+  -e IO_PRESET_D=imagenet_255 \
+  -e MAX_FRAMES=1\
+  style bash -lc 'python /app/run_videos.py'
+
+
+  docker compose run --rm \
+  -e IN_DIR=/app/input_videos \
+  -e OUT_DIR=/app/output \
+  -e PYTORCH_DIR=/app/models/pytorch \
+  -e TORCH_DIR=/app/models/torch \
+  -e MAGENTA_DIR=/app/models/magenta \
+  -e MAGENTA_STYLES_DIR=/app/models/magenta_styles \
+  -e SCALE=2000 \
+  -e FPS=30 \
+  -e PRE_FPS=30 \
+  -e BLEND=0.9 \
+  -e SMOOTH_LIGHTNESS=1 \
+  -e SMOOTH_ALPHA=0.65 \
+  -e FLOW_EMA=0 \
+  -e FLOW_METHOD=dis \
+  -e FLOW_DOWNSCALE=1 \
+  -e OPENCV_OPENCL_DEVICE=disabled \
+  -e OPENCV_NUM_THREADS=1 \
+  -e TF_FORCE_GPU_ALLOW_GROWTH=true \
+  -e TF_CPP_MIN_LOG_LEVEL=2 \
+  style bash -lc 'python /app/drive_videos.py'
+
+
+  docker compose run --rm \
+  -e IN_DIR=/app/input/morph_images \
+  -e OUT_DIR=/app/output/morph_results -e MAX_MODELS=10 \
+  style
+
+
+
+docker compose run --rm \
+  -e MONTAGE=1 \
+  -e MONTAGE_BATCH_SIZE=1 \
+  -e AUTO_SEGMENT=1 \
+  -e INTRO_SECS=2.0 \
+  -e FADE_SECS=0.5 \
+  -e SCALE=1080 \
+  -e FPS=24 \
+  -e PRE_FPS=30 \
+  -e BLEND=0.8 \
+  -e FLOW_EMA=1 \
+  -e FLOW_ALPHA=0.4 \
+  -e SMOOTH_LIGHTNESS=1 \
+  -e SMOOTH_ALPHA=0.6 \
+  -e SMOOTH_CHROMA=1 \
+  -e CHROMA_ALPHA=0.6 \
+  -e STRIDE=2 \
+  -e JPEG_QUALITY=90 \
+  -e CLEAN_FRAMES=1 \
+  -e DEVICE=cpu \
+  -e THREADS=4 \
+  -e SCALE=1080 \
+  -e MODELS="torch7:the_scream | reconet:mosaic_reconet,pytorch:udnie | torch7:the_scream.t7,magenta:canyon.jpg,magenta:atoms.jpg" \
+  style bash -lc 'python /app/drive_videos.py'
+
+
+
+  docker compose run --rm \
+  -e MONTAGE=1 \                 # Enable montage mode (1=on, 0=off). Off = style each video once, no montage assembly.
+  -e MONTAGE_BATCH_SIZE=1 \      # Models per batch. ↑ = blend more models at once (heavier, more abstract); ↓ = isolate models.
+  -e AUTO_SEGMENT=1 \            # Dynamically size segments to match source video. 0 = fixed SEGMENT_SECS.
+  -e INTRO_SECS=2.0 \            # Seconds of original intro clip. ↑ = longer unstyled intro; ↓ = shorter intro.
+  -e FADE_SECS=0.5 \             # Crossfade length. ↑ = smoother/longer transitions but more overlap; ↓ = snappier cuts.
+  -e SCALE=1080 \                # Output resolution height (pixels). ↑ = higher resolution, slower; ↓ = lower quality, faster.
+  -e FPS=24 \                    # Output framerate. ↑ = smoother but larger files; ↓ = choppier but smaller.
+  -e PRE_FPS=30 \                # Extraction fps before styling. ↑ = more frames processed (slower, better temporal coherence); ↓ = faster, less smooth.
+  -e BLEND=0.8 \                 # Mix original + styled (if used). ↑ = more original content visible; ↓ = heavier stylization.
+  -e FLOW_EMA=1 \                # Enable optical flow exponential moving average smoothing. 0 = off.
+  -e FLOW_ALPHA=0.4 \            # Flow warp strength. ↑ = more temporal stability (less flicker, but ghosting risk); ↓ = more raw per-frame style (more jitter).
+  -e SMOOTH_LIGHTNESS=1 \        # Enable temporal smoothing for luminance. 0 = off. Helps stabilize brightness.
+  -e SMOOTH_ALPHA=0.6 \          # Strength of lightness smoothing. ↑ = more stable brightness, less dynamic range; ↓ = more flicker but higher contrast.
+  -e SMOOTH_CHROMA=1 \           # Enable temporal smoothing for color channels. 0 = off.
+  -e CHROMA_ALPHA=0.6 \          # Strength of color smoothing. ↑ = more stable colors, risk of desaturation; ↓ = more vivid but flickery colors.
+  -e STRIDE=2 \                  # Frame stride for optical flow. ↑ = skips frames (faster, but less stable); ↓ = analyzes more frames (slower, more accurate).
+  -e JPEG_QUALITY=90 \           # Frame compression quality (0–100). ↑ = higher quality, bigger intermediates; ↓ = smaller files, more artifacts.
+  -e CLEAN_FRAMES=1 \            # Delete intermediate frame dumps. 0 = keep (debugging, large disk use).
+  -e DEVICE=cpu \                # Force CPU. Set to "cuda" or similar for GPU. GPU = much faster.
+  -e THREADS=4 \                 # CPU threads to use. ↑ = more parallelism; ↓ = less load, slower.
+  -e SCALE=1080 \                # (duplicate) Output resolution, same as above.
+  -e MODELS="torch7:the_scream | reconet:mosaic_reconet,pytorch:udnie | torch7:the_scream.t7,magenta:canyon.jpg,magenta:atoms.jpg" \
+                                 # Model batches:
+                                 #   Batch 1 = The Scream (Torch7)
+                                 #   Batch 2 = ReCoNet Mosaic + Udnie
+                                 #   Batch 3 = The Scream + Canyon + Atoms (Magenta)
+  style bash -lc 'python /app/drive_videos.py'
+
+
+
+  docker compose run --rm \
+  -e MONTAGE=1 \
+  -e MONTAGE_BATCH_SIZE=1 \
+  -e AUTO_SEGMENT=1 \
+  -e INTRO_SECS=2.0 \
+  -e FADE_SECS=0.5 \
+  -e SCALE=1080 \
+  -e FPS=30 \
+  -e PRE_FPS=30 \
+  -e BLEND=0.7 \
+  -e FLOW_EMA=1 \
+  -e FLOW_ALPHA=0.7 \
+  -e SMOOTH_LIGHTNESS=1 \
+  -e SMOOTH_ALPHA=0.6 \
+  -e SMOOTH_CHROMA=1 \
+  -e CHROMA_ALPHA=0.6 \
+  -e STRIDE=2 \
+  -e JPEG_QUALITY=90 \
+  -e CLEAN_FRAMES=1 \
+  -e DEVICE=cpu \
+  -e THREADS=4 \
+  -e MODELS="torch7:la_muse_eccv16 | pytorch:rain_princess | pytorch:udnie | reconet:mosaic_reconet | torch7:composition_vii_eccv16 |  torch7:starry_night_eccv16 | torch7:the_scream | pytorch:mosaic" \
+  style bash -lc 'python /app/drive_videos.py'
+
+
+
+
+
+
+
+  docker compose run --rm style bash -lc '
+  python /app/pipeline.py \
+    --input_image /app/input/frame.jpeg \
+    --output_image /app/output/frame_fg_mosaic.jpg \
+    --model /app/models/pytorch/mosaic.pth \
+    --model_type transformer \
+    --io_preset auto \
+    --mask /app/output/sky_mask.png \
+    --mask_invert \
+    --mask_feather_pct 1.0 \
+    --fit_mask_to input \
+    --composite_mode keep \
+    --blend 1.0 \
+    --device cpu \
+    --inference_res 1280
+
+
+
+
+
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayesfull.mp4 \
+  OUTPUT_VIDEO=/app/output/clip_fg_mosaic_full.mp4 \
+  FRAMES_DIR=/app/_work/frames \
+  MASKS_DIR=/app/_work/masks \
+  DEEPLAB_WEIGHTS=/app/models/deeplab/deeplab-drn.pth.tar \
+  BACKBONE=drn \
+  STYLE_MODEL=/app/models/pytorch/mosaic.pth \
+  STYLE_MODEL_TYPE=transformer \
+  SCALE=1080 \
+  FPS=24 \
+  INFER_RES=1280 \
+  MASK_RES=512 \
+  MASK_EXPAND_PCT=0.5 \
+  MASK_FEATHER_PCT=10.0 \
+  DEVICE=cpu \
+  CANVAS_W=1920 \
+  CANVAS_H=1080 \
+  PRE_SCALE_MODE=canvas \
+  bash /app/run_sky_swap.sh
+'
+
+
+
+
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayes1.m4v \
+  OUTPUT_VIDEO=/app/output/clip_fg_mosaic.mp4 \
+  FRAMES_DIR=/app/_work/frames \
+  MASKS_DIR=/app/_work/masks \
+  DEEPLAB_WEIGHTS=/app/models/deeplab/deeplab-drn.pth.tar \
+  BACKBONE=drn \
+  STYLE_MODEL= \
+  STYLE_MODEL_TYPE=transformer \
+  SCALE=1080 \
+  FPS=24 \
+  INFER_RES=1280 \
+  MASK_RES=512 \
+  MASK_EXPAND_PCT=3.0 \
+  MASK_FEATHER_PCT=3.0 \
+  DEVICE=cpu \
+  OUT_DIR=/app/output \
+  CANVAS_W=1920 \
+  CANVAS_H=1080 \
+  PRE_SCALE_MODE=canvas \
+  VARIANTS=fg,bg \
+  SKIP_EXTRACT=0 \
+  SKIP_MASKS=0 \
+  PYTORCH_DIR=/app/models/pytorch \
+  TORCH7_DIR=/app/models/torch \
+  PYTORCH_MODELS="mosaic.pth rain_princess.pth udnie.pth" \
+  TORCH7_MODELS="composition_vii_eccv16.t7 la_muse_eccv16.t7 starry_night_eccv16.t7 the_scream.t7" \
+  bash /app/run_sky_swap.sh
+'
+
+
+
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayesfull.mp4 \
+  STYLE_MODEL=/app/models/reconet/mosaic_reconet.pth \
+  STYLE_MODEL_TYPE=transformer \
+  VARIANTS=fg,bg \
+  PIPELINE_MODE=video BLEND=0.85 FLOW_ALPHA=0.90 \
+  SCALE=1080 INFER_RES=1280 FPS=24 \
+  USE_MASK=1 MASK_RES=512 MASK_EXPAND_PCT=1.5 MASK_FEATHER_PCT=2.0 \
+  SKIP_EXTRACT=1 SKIP_MASKS=1 \
+  bash /app/run_sky_swap.sh
+'
+
+
+# Pass 1: FG with negative expand (grow FG area after invert)
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayesfull.mp4 \
+  VARIANTS=fg \
+  STYLE_MODEL=/app/models/reconet/mosaic_reconet.pth \
+  STYLE_MODEL_TYPE=reconet IO_PRESET=imagenet_01 \
+  SCALE=1080 INFER_RES=1280 FPS=24 \
+  MASK_FEATHER_PCT=2.0 MASK_EXPAND_PCT=-1.5 \
+  FLOW_EMA=1 FLOW_ALPHA=0.85 MOTION_BLEND=1 \
+  SMOOTH_ALPHA=0.70 SMOOTH_LIGHTNESS=1 \
+  bash /app/run_sky_swap.sh
+'
+
+# Pass 2: BG with positive expand (grow sky area)
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayesfull.mp4 \
+  VARIANTS=bg \
+  STYLE_MODEL=/app/models/reconet/mosaic_reconet.pth \
+  STYLE_MODEL_TYPE=reconet IO_PRESET=imagenet_01 \
+  SCALE=1080 INFER_RES=1280 FPS=24 \
+  MASK_FEATHER_PCT=2.0 MASK_EXPAND_PCT=+1.5 \
+  FLOW_EMA=1 FLOW_ALPHA=0.85 MOTION_BLEND=1 \
+  SMOOTH_ALPHA=0.70 SMOOTH_LIGHTNESS=1 \
+  bash /app/run_sky_swap.sh
+'
+
+
+
+
+docker compose run --rm style bash -lc '
+  INPUT_VIDEO=/app/input_videos/myclip_fayes1.m4v \
+  VARIANTS=fg \
+  STYLE_MODEL=/app/models/reconet/mosaic_reconet.pth \
+  STYLE_MODEL_TYPE=reconet \
+  IO_PRESET=imagenet_01 \
+  # --- DeepLab (fix extension) ---
+  DEEPLAB_WEIGHTS=/app/models/deeplab/deeplab-resnet.pth.tar \
+  BACKBONE=resnet \
+  # --- IO / sizing ---
+  FRAMES_DIR=/app/_work/frames \
+  MASKS_DIR=/app/_work/masks \
+  SCALE=1080 INFER_RES=1280 FPS=24 \
+  # --- Masking (fg targets + soften edges) ---
+  MASK_RES=512 MASK_EXPAND_PCT=2.0 MASK_FEATHER_PCT=6.0 \
+  MASK_TARGET_LABELS="person,bicycle,motorbike,motorcycle" \
+  SKIP_EXTRACT=0 SKIP_MASKS=0 \
+  # --- Enable temporal smoothing (needs video mode) ---
+  PIPELINE_MODE=video \
+  FLOW_EMA=1 FLOW_ALPHA=0.85 BLEND=0.9 \
+  bash /app/run_sky_swap.sh
+'
+
+
+docker compose run --rm \
+  -e INPUT_VIDEO=/app/input_videos/bmshort.mp4 \
+  -e AUTO_CANVAS=1 \
+  -e FILL_FRAME_FOR_LANDSCAPE=0 \
+  -e FILL_FRAME_FOR_PORTRAIT=1 \
+  -e FPS=24 \
+  -e INFER_RES=1080 \
+  -e MASK_RES=1024 \
+  -e MASK_EXPAND_PCT=2.0 \
+  -e MASK_FEATHER_PCT=4.0 \
+  -e STYLE_BY_LABEL=1 \
+  -e BASE_AS_ORIGINAL=1 \
+  -e PERSON_LABELS=person \
+  -e VEHICLE_LABELS="bicycle,motorbike" \
+  -e PERSON_MODEL=/app/models/torch/la_muse_eccv16.t7 \
+  -e PERSON_MODEL_TYPE=torch7 \
+  -e VEHICLE_MODEL=/app/models/pytorch/udnie.pth \
+  -e VEHICLE_MODEL_TYPE=transformer \
+  -e VEHICLE_MASK_INVERT=0 \
+  -e MASK_DEBUG_OVERLAY=1 \
+  style bash -lc "/bin/bash /app/run_sky_swap.sh"
+
+
+
+
+style an image:
+docker compose run --rm style bash -lc '
+set -euo pipefail
+
+CANVAS_W=1920
+CANVAS_H=1080
+
+mkdir -p /app/_work /app/output
+
+ffmpeg -hide_banner -loglevel warning -y \
+  -i /app/input/frame_hq.jpeg \
+  -vf "scale=${CANVAS_W}:${CANVAS_H}:flags=lanczos:force_original_aspect_ratio=decrease,\
+pad=${CANVAS_W}:${CANVAS_H}:(ow-iw)/2:(oh-ih)/2:color=black" \
+  /app/_work/frame_hq_canvas.png
+
+python /app/sky_swap.py \
+  --image /app/_work/frame_hq_canvas.png \
+  --weights /app/models/deeplab/deeplab-resnet.pth.tar \
+  --backbone resnet \
+  --resolution 1536 \
+  --mask_expand_pct 0.5 \
+  --mask_contract_pct 0.5 \
+  --mask_feather_pct 0.0 \
+  --target_ids 15 \
+  --morph_close_ks 5 \
+  --out_mask /app/_work/frame_hq_person_mask.png \
+  --debug_overlay
+
+python /app/pipeline.py \
+  --input_image /app/_work/frame_hq_canvas.png \
+  --output_image /app/output/frame_hq_person_mosaic.png \
+  --model /app/models/pytorch/mosaic.pth \
+  --model_type transformer \
+  --io_preset imagenet_255 \
+  --inference_res 1080 \
+  --scale 720 \
+  --mask /app/_work/frame_hq_person_mask.png \
+  --fit_mask_to input \
+  --composite_mode keep \
+  --mask_autofix
+'
+
+
+
+
+
+
+docker compose run --rm style bash -lc '
+set -euo pipefail
+
+# -------- settings --------
+IMG_IN="/app/input/winter1.jpeg"          # change if your image path/name differs
+STEM="$(basename -- "${IMG_IN%.*}")"
+WORK="/app/_work/${STEM}"
+OUT="/app/output"
+mkdir -p "$WORK" "$OUT"
+
+# -------- 0) bake input to a clean PNG (no EXIF, correct orientation) --------
+ffmpeg \
+  -hide_banner \
+  -loglevel warning \
+  -y \
+  -i "$IMG_IN" \
+  -vf "
+    scale=iw:ih:flags=lanczos,
+    setsar=1" \
+  -pix_fmt rgb24 \
+  "$WORK/${STEM}_baked.png"
+
+# -------- 1) make a PERSON mask on the baked raster (VOC person=15) --------
+python /app/sky_swap.py \
+  --image "$WORK/${STEM}_baked.png" \
+  --weights /app/models/deeplab/deeplab-resnet.pth.tar \
+  --backbone resnet \
+  --resolution 1536 \
+  --mask_expand_pct 0.5 \
+  --mask_contract_pct 0.5 \
+  --mask_feather_pct 0.0 \
+  --target_ids 15 \
+  --morph_close_ks 5 \
+  --out_mask "$WORK/${STEM}_person_mask.png"
+
+# helper to run a model for FG (person) and BG (background)
+run_pair () {
+  local MODEL_PATH="$1"
+  local MODEL_TYPE="$2"         # torch7 | transformer
+  local IO_PRESET="$3"          # caffe_bgr | imagenet_255
+  local TAG="$4"                # short tag for filenames
+
+  # Foreground (person only): apply style INSIDE mask (no invert)
+  python /app/pipeline.py \
+    --input_image "$WORK/${STEM}_baked.png" \
+    --output_image "$OUT/${STEM}_fg_${TAG}.png" \
+    --model "$MODEL_PATH" \
+    --model_type "$MODEL_TYPE" \
+    --io_preset "$IO_PRESET" \
+    --inference_res 1080 \
+    --scale 720 \
+    --mask "$WORK/${STEM}_person_mask.png" \
+    --fit_mask_to input \
+    --composite_mode keep \
+    --mask_autofix
+
+  # Background (everything but person): invert the mask
+  python /app/pipeline.py \
+    --input_image "$WORK/${STEM}_baked.png" \
+    --output_image "$OUT/${STEM}_bg_${TAG}.png" \
+    --model "$MODEL_PATH" \
+    --model_type "$MODEL_TYPE" \
+    --io_preset "$IO_PRESET" \
+    --inference_res 1080 \
+    --scale 720 \
+    --mask "$WORK/${STEM}_person_mask.png" \
+    --fit_mask_to input \
+    --mask_invert \
+    --composite_mode keep \
+    --mask_autofix
+}
+
+# -------- 2) Torch7 models (.t7) --------
+run_pair "/app/models/torch/composition_vii_eccv16.t7" torch7 caffe_bgr composition_vii_eccv16
+run_pair "/app/models/torch/la_muse_eccv16.t7"         torch7 caffe_bgr la_muse_eccv16
+run_pair "/app/models/torch/starry_night_eccv16.t7"    torch7 caffe_bgr starry_night_eccv16
+run_pair "/app/models/torch/the_scream.t7"             torch7 caffe_bgr the_scream
+
+# -------- 3) PyTorch transformer models (.pth) --------
+run_pair "/app/models/pytorch/mosaic.pth"         transformer imagenet_255 mosaic
+run_pair "/app/models/pytorch/rain_princess.pth"  transformer imagenet_255 rain_princess
+run_pair "/app/models/pytorch/udnie.pth"          transformer imagenet_255 udnie
+
+echo "✅ Done. Check $OUT for ${STEM}_{fg|bg}_<model>.png"
+'

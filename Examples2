@@ -1,0 +1,65 @@
+docker compose run --rm \
+  -e INPUT_VIDEO=/app/input_videos/input.mp4 \
+  -e OUTPUT_VIDEO=/app/output/input_person_udnie_vehicle_mosaic_bg_original.mp4 \
+  \
+  -e DEEPLAB_WEIGHTS=/app/models/deeplab/deeplab-resnet.pth.tar \
+  -e BACKBONE=resnet \
+  -e MASK_RES=1024 \
+  -e MASK_EXPAND_PCT=2.0 \
+  -e MASK_FEATHER_PCT=4.0 \
+  \
+  -e STYLE_BY_LABEL=1 \
+  -e BASE_AS_ORIGINAL=1 \
+  \
+  -e PERSON_LABELS=person \
+  -e PERSON_MODEL=/app/models/pytorch/mosaic.pth \
+  -e PERSON_MODEL_TYPE=transformer \
+  -e PERSON_IO_PRESET=imagenet_255 \
+  -e PERSON_MASK_INVERT=0 \
+  \
+  -e VEHICLE_LABELS="bicycle,motorbike" \
+  -e VEHICLE_MODEL=/app/models/pytorch/mosaic.pth \
+  -e VEHICLE_MODEL_TYPE=transformer \
+  -e VEHICLE_IO_PRESET=imagenet_255 \
+  -e VEHICLE_MASK_INVERT=0 \
+  \
+  -e SCALE=1080 \
+  -e INFER_RES=1280 \
+  -e FPS=10 \
+  -e FLOW_EMA=1 \
+  -e FLOW_ALPHA=0.8 \
+  -e SMOOTH_LIGHTNESS=1 \
+  -e SMOOTH_ALPHA=0.7 \
+  -e BLEND=0.9 \
+  \
+  -e SKIP_EXTRACT=0 \
+  -e SKIP_MASKS=0 \
+  -e SKIP_STYLE=0 \
+  -e CLEAN_FRAMES=1 \
+  style bash -lc 'bash /app/run_sky_swap.sh'
+
+
+
+Person not styled and vehicle not styled (passthrough)
+docker compose run --rm \
+  -e INPUT_VIDEO=/app/input_videos/input.mp4 \
+  -e OUTPUT_VIDEO=/app/output/bg_styled_no_person_vehicle.mp4 \
+  -e STYLE_BY_LABEL=1 \
+  -e BASE_AS_ORIGINAL=1 \
+  -e PERSON_MODEL=/app/models/pytorch/udnie.pth \
+  -e PERSON_MODEL_TYPE=transformer \
+  -e PERSON_IO_PRESET=imagenet_255 \
+  -e PERSON_LABELS='__unused_label__' \
+  -e VEHICLE_LABELS='person,bicycle,motorbike' \
+  -e VEHICLE_MODEL=/app/models/pytorch/udnie.pth \
+  -e VEHICLE_MODEL_TYPE=transformer \
+  -e VEHICLE_IO_PRESET=imagenet_255 \
+  -e VEHICLE_MASK_INVERT=1 \
+  -e SKIP_EXTRACT=0 \
+  -e SKIP_MASKS=0 \
+  -e SKIP_STYLE=0 \
+  -e CLEAN_FRAMES=1 \
+  -e FPS=10 \
+  style bash -lc 'bash /app/run_sky_swap.sh'
+
+

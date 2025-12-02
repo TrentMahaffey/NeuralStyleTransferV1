@@ -1,0 +1,65 @@
+diff --git a/pipeline.py b/pipeline.py
+--- a/pipeline.py
++++ b/pipeline.py
+@@ -409,19 +409,33 @@ def style_frames(
+ 
+         # ---- Original-image blend (uniform or motion-adaptive) ----
+         out01_smooth = to_tensor(out_img).unsqueeze(0)
+-        # ---- Optional region mask composite (foreground/background) ----
+-        mask_used = False
+-        if getattr(args, "mask", None):
+-            try:
+-                # Align mask to requested stage
+-                if args.fit_mask_to == "output":
+-                    ref_H, ref_W = out01_smooth.shape[-2], out01_smooth.shape[-1]
+-                else:
+-                    ref_H, ref_W = x_orig01.shape[-2], x_orig01.shape[-1]
+-                fpx = _pct_to_px(getattr(args, "mask_feather_pct", 0.0) or 0.0, ref_H)
+-                if getattr(args, "mask_feather", 0) and getattr(args, "mask_feather", 0) > 0:
+-                    fpx = max(fpx, int(args.mask_feather))
+-                alpha = _load_mask_fit(args.mask, (ref_H, ref_W), bool(getattr(args, "mask_invert", False)), int(fpx))  # HxWx1
++        # ---- Optional region mask composite (foreground/background) ----
++        mask_used = False
++        # Resolve mask source: explicit --mask takes priority, else look in --mask_dir/mask_%04d.png
++        mask_file = getattr(args, "mask", None)
++        if not mask_file and getattr(args, "mask_dir", None):
++            try:
++                stem_num = frame_path.stem.split("_")[-1]  # e.g., 0001 from frame_0001.jpg
++                cand = Path(args.mask_dir) / f"mask_{stem_num}.png"
++                if cand.exists():
++                    mask_file = str(cand)
++            except Exception:
++                mask_file = None
++        if mask_file:
++            try:
++                # Align mask to requested stage
++                if args.fit_mask_to == "output":
++                    ref_H, ref_W = out01_smooth.shape[-2], out01_smooth.shape[-1]
++                else:
++                    ref_H, ref_W = x_orig01.shape[-2], x_orig01.shape[-1]
++                fpx = _pct_to_px(getattr(args, "mask_feather_pct", 0.0) or 0.0, ref_H)
++                if getattr(args, "mask_feather", 0) and getattr(args, "mask_feather", 0) > 0:
++                    fpx = max(fpx, int(args.mask_feather))
++                alpha = _load_mask_fit(mask_file, (ref_H, ref_W), bool(getattr(args, "mask_invert", False)), int(fpx))  # HxWx1
+ 
+             # (leave the remainder of the composite logic unchanged)
+ 
+@@ -519,6 +533,9 @@ def main():
+     ap.add_argument("--mask", type=str, default=None, help="Path to an 8-bit mask image (255 = process region).")
+     ap.add_argument("--mask_invert", action="store_true", help="Invert mask so 255 selects background instead.")
+     ap.add_argument("--mask_feather", type=int, default=0, help="Feather radius in pixels (applied after resize).")
++    ap.add_argument("--mask_dir", type=str, default=None,
++                    help="Directory of per-frame masks named mask_%04d.png (255 = process region).")
+     ap.add_argument("--mask_feather_pct", type=float, default=0.0, help="Feather radius as percent of image height.")
+     ap.add_argument("--fit_mask_to", choices=["input", "output"], default="input", help="Resize mask to match input or output dimensions before blending.")
+     ap.add_argument("--composite_mode", choices=["keep", "replace"], default="keep", help="keep = stylize masked region only; replace = stylize unmasked region.")
+@@ -874,8 +891,5 @@ def main():
+         for p in frames_dir.glob("styled_frame_*.jpg"): p.unlink(missing_ok=True)
+ 
+ 
+-if __name__ == "__main__":        
+-    main()
+-    ap.add_argument("--sky_template", type=str, default="/app/sky_templates/new_sky3",
+-                    help="Path to sky replacement template directory or file.")
++if __name__ == "__main__":
++    main()

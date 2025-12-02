@@ -1,0 +1,13 @@
+torch
+torchvision
+opencv-python
+Pillow>=10.0.0
+numpy>=1.26,<2.0
+
+# legacy .t7 loader
+torchfile>=0.1.0
+
+# TensorFlow stack for Magenta / TF-Hub backend
+tensorflow>=2.16.1,<2.21
+tensorflow-hub>=0.15.0
+# If you need GCS support later: pip install "tensorflow[gcs-filesystem]"

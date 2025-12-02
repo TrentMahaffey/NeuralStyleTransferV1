@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+
+# Large model files
+models/deeplab/
+models/deeplab
+
+# Work directories (frames, temp files)
+work/*
+_work/*
+!_work/.gitkeep
+
+# Output videos
+output/*
+output copy/*
+!output/.gitkeep
+outputold/
+
+# Input videos
+input_videos/*
+input_videos_old/
+!input_videos/.gitkeep
+
+# Input images (large)
+input/morph_images/*
+input/*.mp4
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Large misc files
+*.mp4
+*.mov
+*.avi

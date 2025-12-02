@@ -1,0 +1,24 @@
+
+services:
+  style:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: neural-style:baseV0
+    working_dir: /app
+    command: >-
+      bash -lc "bash /app/morph.sh"
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    environment:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      OPENCV_OPENCL_DEVICE: "disabled"
+      OPENCV_NUM_THREADS: "1"
+    shm_size: "2g"          # /dev/shm; 2G is a good Mac default
+    mem_limit: "8g"         # hard cap inside the Docker VM
+    mem_reservation: "4g"   # soft reservation
