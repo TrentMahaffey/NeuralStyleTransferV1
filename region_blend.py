@@ -769,8 +769,42 @@ def warp_all_masks_organic(masks: List[Mask], morph: MorphAnimation,
     mask_sum = torch.zeros_like(warped[0])
     for m in warped:
         mask_sum += m
-    mask_sum = mask_sum.clamp(min=1e-6)
 
+    # Fix black artifacts: detect pixels with very low coverage and fill gaps
+    # This happens when warping moves all masks away from certain areas
+    MIN_COVERAGE = 0.1  # Threshold below which we consider it a "gap"
+    gap_mask = (mask_sum < MIN_COVERAGE).float()
+
+    if gap_mask.sum() > 0:
+        # Fill gaps by dilating each mask to cover uncovered pixels
+        # Use iterative dilation with increasing kernel sizes for large gaps
+        filled_masks = list(warped)  # Copy list
+
+        for kernel_size in [5, 11, 21, 41]:  # Progressively larger kernels
+            padding = kernel_size // 2
+            new_filled = []
+            for m in filled_masks:
+                # Dilate mask using max pooling with padding
+                dilated = F.max_pool2d(m, kernel_size=kernel_size, stride=1, padding=padding)
+                # Blend original with dilated only in gap regions
+                filled = m * (1 - gap_mask) + dilated * gap_mask
+                new_filled.append(filled)
+
+            # Recalculate sum and remaining gaps
+            mask_sum = torch.zeros_like(new_filled[0])
+            for m in new_filled:
+                mask_sum += m
+            gap_mask = (mask_sum < MIN_COVERAGE).float()
+            filled_masks = new_filled
+
+            # Stop early if all gaps are filled
+            if gap_mask.sum() == 0:
+                break
+
+        warped = filled_masks
+
+    # Final normalization with safe minimum
+    mask_sum = mask_sum.clamp(min=1e-6)
     normalized = [m / mask_sum for m in warped]
 
     return normalized
@@ -2221,7 +2255,39 @@ def composite_from_crops(
                                 mode='bilinear', align_corners=False)
         weight_sum[:, y1:y2, x1:x2] += mask.squeeze(0)
 
-    # Normalize by total weight
+    # Normalize by total weight, handling gaps (low coverage areas)
+    # Detect gaps where weight is very low - these cause black artifacts
+    MIN_COVERAGE = 0.1
+    gap_mask = (weight_sum < MIN_COVERAGE).float()
+
+    # If we have gaps, fill them to prevent black artifacts
+    if gap_mask.sum() > 0:
+        gap_mask_expanded = gap_mask.expand(C, -1, -1)
+
+        if original is not None:
+            # Fill canvas gaps with original frame
+            canvas = canvas + original * gap_mask_expanded
+            weight_sum = weight_sum + gap_mask
+        else:
+            # No original available - fill gaps by dilating the canvas
+            # This spreads nearby styled pixels into the gaps
+            for kernel_size in [5, 11, 21]:
+                padding = kernel_size // 2
+                # Dilate canvas values (sum of weighted pixels)
+                canvas_dilated = F.max_pool2d(canvas.unsqueeze(0), kernel_size=kernel_size,
+                                              stride=1, padding=padding).squeeze(0)
+                # Dilate weights
+                weight_dilated = F.max_pool2d(weight_sum.unsqueeze(0), kernel_size=kernel_size,
+                                              stride=1, padding=padding).squeeze(0)
+                # Fill only gap areas
+                canvas = canvas * (1 - gap_mask_expanded) + canvas_dilated * gap_mask_expanded
+                weight_sum = weight_sum * (1 - gap_mask) + weight_dilated * gap_mask
+                # Recalculate gaps
+                gap_mask = (weight_sum < MIN_COVERAGE).float()
+                gap_mask_expanded = gap_mask.expand(C, -1, -1)
+                if gap_mask.sum() == 0:
+                    break
+
     weight_sum = weight_sum.expand(C, -1, -1).clamp(min=1e-6)
     canvas = canvas / weight_sum
 

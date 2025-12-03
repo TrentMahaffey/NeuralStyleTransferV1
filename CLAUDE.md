@@ -351,6 +351,23 @@ python3 /app/pipeline.py \
 - Work directory: `_work/frames/` (temporary frame storage)
 - Models: `models/{pytorch,torch,magenta_styles,reconet}/`
 
+## Web UI
+
+The web interface has been moved to a separate repository:
+- **Repo**: [NeuralStyleWeb](https://github.com/TrentMahaffey/NeuralStyleWeb)
+- **Location**: `../NeuralStyleWeb/` (sibling folder)
+
+To run the web UI:
+```bash
+cd ../NeuralStyleWeb
+docker-compose up web
+# Access at http://localhost:5001
+```
+
+The web UI's docker-compose mounts both repos:
+- `/app` → This pipeline repo
+- `/web` → NeuralStyleWeb repo
+
 ## Troubleshooting
 
 ### Regions flashing/changing
