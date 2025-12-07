@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Optical Flow Slideshow - Magenta Self-Style
-Creates a video from self-styled images with optical flow morphing.
+Optical Flow Slideshow - Image 1 Batch Self-Style Results
+Creates a video from Image 1's 7 tile size variations with optical flow morphing.
 """
 
 import cv2
 import numpy as np
 import os
 import glob
-import random
 
 def optical_flow_morph(img1, img2, num_interp_frames=12):
     """Generate interpolated frames between two images using optical flow."""
@@ -56,25 +55,22 @@ def optical_flow_morph(img1, img2, num_interp_frames=12):
     return frames
 
 
-def create_selfstyle_slideshow(image_dir, output_path,
-                               hold_frames=0, interp_frames=48,
-                               fps=24, target_size=(1280, 720),
-                               seed=42, zoom=1.0):
-    """Create slideshow from self-styled images."""
+def create_batch_slideshow(image_dir, output_path, image_prefix="img1",
+                           hold_frames=0, interp_frames=120,
+                           fps=24, target_size=(1280, 720), zoom=1.0):
+    """Create slideshow from batch-styled images for a specific image number."""
 
-    # Collect "Final Image" files from all subdirectories
-    all_images = glob.glob(os.path.join(image_dir, '**/Final Image.*'), recursive=True)
-    all_images.extend(glob.glob(os.path.join(image_dir, '**/final image.*'), recursive=True))
+    # Find all images for this prefix, sorted by tile size
+    pattern = os.path.join(image_dir, f"{image_prefix}_tile*.jpg")
+    all_images = sorted(glob.glob(pattern))
 
     if len(all_images) < 2:
-        print(f"Need at least 2 selfstyle images, found {len(all_images)}")
+        print(f"Need at least 2 images for {image_prefix}, found {len(all_images)}")
         return
 
-    # Shuffle for variety
-    random.seed(seed)
-    random.shuffle(all_images)
-
-    print(f"Processing {len(all_images)} self-styled images ({target_size[0]}x{target_size[1]})...")
+    print(f"Processing {len(all_images)} styled images for {image_prefix} ({target_size[0]}x{target_size[1]})...")
+    for img in all_images:
+        print(f"  - {os.path.basename(img)}")
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, target_size)
@@ -157,16 +153,16 @@ def create_selfstyle_slideshow(image_dir, output_path,
 
 
 if __name__ == '__main__':
-    image_dir = '/Users/trentmahaffey/Dev/NeuralStyleTransferV1/input/self_style_samples'
-    output_path = '/Users/trentmahaffey/Dev/NeuralStyleTransferV1/output/selfstyle_optflow_5s.mp4'
+    image_dir = '/Users/trentmahaffey/Dev/NeuralStyleTransferV1/output/batch_selfstyle'
+    output_path = '/Users/trentmahaffey/Dev/NeuralStyleTransferV1/output/img1_optflow_5s.mp4'
 
-    create_selfstyle_slideshow(
+    create_batch_slideshow(
         image_dir=image_dir,
         output_path=output_path,
+        image_prefix="img1",
         hold_frames=0,      # No hold - continuous morphing
         interp_frames=120,  # 5s transition at 24fps
         fps=24,
         target_size=(1280, 720),  # Horizontal 16:9
-        seed=42,
-        zoom=2.0            # 200% zoom on high-res sources
+        zoom=1.5            # 150% zoom (images are 1440p so plenty of detail)
     )

@@ -122,6 +122,53 @@ def get_source_images():
     return images
 
 
+def get_premade_image_folders():
+    """
+    Get pre-made image folders from self_style_samples directory.
+
+    Looks for folders named "Image X" containing:
+    - "final image.*" or "Final Image.*" - The CROPPED CONTENT to style (input)
+    - "style image.*" or "Style Image.*" - The STYLE REFERENCE for Magenta
+    - "raw image.*" or "Raw Image.*" - Original full image (for thumbnail overlay)
+
+    Returns list of dicts with 'folder', 'content', 'style', 'raw' paths.
+    """
+    folders = []
+
+    if not INPUT_DIR.exists():
+        return folders
+
+    # Look for "Image X" folders
+    for folder in sorted(INPUT_DIR.iterdir()):
+        if not folder.is_dir() or folder.name.startswith('.'):
+            continue
+
+        # Find files in folder (case-insensitive matching)
+        content_image = None  # "final image" = cropped content to style
+        style_image = None    # "style image" = style reference
+        raw_image = None      # "raw image" = original for thumbnail
+
+        for f in folder.iterdir():
+            name_lower = f.name.lower()
+            if name_lower.startswith('final image') or name_lower.startswith('final_image'):
+                content_image = f
+            elif name_lower.startswith('style image') or name_lower.startswith('style_image'):
+                style_image = f
+            elif name_lower.startswith('raw image') or name_lower.startswith('raw_image'):
+                raw_image = f
+
+        # Need both content and style to run Magenta
+        if content_image and style_image:
+            folders.append({
+                'folder': folder,
+                'content': content_image,  # What to style
+                'style': style_image,      # Style reference
+                'raw': raw_image,          # For thumbnail (optional)
+            })
+
+    return folders
+
+
 def extract_center_crop(input_path, output_path, crop_ratio=CENTER_CROP_RATIO):
     """
     Extract center crop from an image.
@@ -200,15 +247,22 @@ def generate_self_style(input_image, output_path, tile, overlap, blend, scale=HI
     return output_path.exists()
 
 
-def add_thumbnail_overlay(styled_path, original_path, output_path):
+def add_thumbnail_overlay(styled_path, original_path, output_path, style_path=None):
     """
-    Add a small thumbnail of the original image in the top-left corner
-    of the styled image.
+    Add thumbnail overlays to the styled image.
+
+    For Self Style presets with separate content and style images:
+    - Top-left: Content image (what's being styled)
+    - Top-right: Style image (the style reference)
+
+    For single-image presets:
+    - Top-left: Original image only
 
     Args:
         styled_path: Path to the styled image (main display)
-        original_path: Path to the original image (for thumbnail)
+        original_path: Path to the content/original image (for left thumbnail)
         output_path: Where to save the final composited image
+        style_path: Optional path to style image (for right thumbnail)
     """
     if Image is None:
         print("  PIL not available, skipping thumbnail overlay")
@@ -216,11 +270,11 @@ def add_thumbnail_overlay(styled_path, original_path, output_path):
 
     try:
         styled = Image.open(styled_path)
-        original = Image.open(original_path)
+        content_img = Image.open(original_path)
 
-        # Apply EXIF orientation to original
+        # Apply EXIF orientation to content
         if exif_transpose is not None:
-            original = exif_transpose(original)
+            content_img = exif_transpose(content_img)
 
         # Resize styled image to final output size
         styled_ratio = styled.width / styled.height
@@ -235,20 +289,40 @@ def add_thumbnail_overlay(styled_path, original_path, output_path):
 
         # Calculate thumbnail size (15% of output width)
         thumb_width = int(final_width * THUMBNAIL_RATIO)
-        orig_ratio = original.width / original.height
-        thumb_height = int(thumb_width / orig_ratio)
 
-        # Resize original to thumbnail size
-        thumbnail = original.resize((thumb_width, thumb_height), Image.LANCZOS)
+        # Create content thumbnail (left side)
+        content_ratio = content_img.width / content_img.height
+        content_thumb_height = int(thumb_width / content_ratio)
+        content_thumb = content_img.resize((thumb_width, content_thumb_height), Image.LANCZOS)
 
-        # Create border around thumbnail
+        # Create bordered content thumbnail
         bordered_width = thumb_width + 2 * THUMBNAIL_BORDER
-        bordered_height = thumb_height + 2 * THUMBNAIL_BORDER
-        bordered_thumb = Image.new('RGB', (bordered_width, bordered_height), (255, 255, 255))
-        bordered_thumb.paste(thumbnail, (THUMBNAIL_BORDER, THUMBNAIL_BORDER))
+        bordered_height = content_thumb_height + 2 * THUMBNAIL_BORDER
+        bordered_content = Image.new('RGB', (bordered_width, bordered_height), (255, 255, 255))
+        bordered_content.paste(content_thumb, (THUMBNAIL_BORDER, THUMBNAIL_BORDER))
 
-        # Paste thumbnail in top-left corner with padding
-        styled.paste(bordered_thumb, (THUMBNAIL_PADDING, THUMBNAIL_PADDING))
+        # Paste content thumbnail in top-left corner
+        styled.paste(bordered_content, (THUMBNAIL_PADDING, THUMBNAIL_PADDING))
+
+        # If style image provided, add it to top-right
+        if style_path and Path(style_path).exists():
+            style_img = Image.open(style_path)
+            if exif_transpose is not None:
+                style_img = exif_transpose(style_img)
+
+            style_ratio = style_img.width / style_img.height
+            style_thumb_height = int(thumb_width / style_ratio)
+            style_thumb = style_img.resize((thumb_width, style_thumb_height), Image.LANCZOS)
+
+            # Create bordered style thumbnail
+            style_bordered_width = thumb_width + 2 * THUMBNAIL_BORDER
+            style_bordered_height = style_thumb_height + 2 * THUMBNAIL_BORDER
+            bordered_style = Image.new('RGB', (style_bordered_width, style_bordered_height), (255, 255, 255))
+            bordered_style.paste(style_thumb, (THUMBNAIL_BORDER, THUMBNAIL_BORDER))
+
+            # Paste style thumbnail in top-right corner
+            right_x = final_width - style_bordered_width - THUMBNAIL_PADDING
+            styled.paste(bordered_style, (right_x, THUMBNAIL_PADDING))
 
         styled.save(output_path, quality=90)
         return True
@@ -265,18 +339,61 @@ def create_comparison(original_path, styled_path, output_path):
     return add_thumbnail_overlay(styled_path, original_path, output_path)
 
 
+def run_magenta_style_transfer(content_path, style_path, output_path, tile, overlap, blend, scale=HIGH_RES_SCALE):
+    """
+    Run Magenta arbitrary style transfer with separate content and style images.
+
+    Args:
+        content_path: Path to the content image (what to style)
+        style_path: Path to the style image (style reference)
+        output_path: Where to save styled output
+        tile: Magenta tile size
+        overlap: Magenta overlap size
+        blend: Style blend strength
+        scale: Output resolution
+
+    Returns:
+        True if successful, False otherwise
+    """
+    cmd = [
+        "python3", "/app/pipeline.py",
+        "--input_image", str(content_path),
+        "--output_image", str(output_path),
+        "--model_type", "magenta",
+        "--magenta_style", str(style_path),  # Style image (different from content!)
+        "--magenta_tile", str(tile),
+        "--magenta_overlap", str(overlap),
+        "--scale", str(scale),
+        "--blend", str(blend),
+    ]
+
+    print(f"  Running Magenta: tile={tile}, overlap={overlap}, blend={blend}, scale={scale}...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"  ERROR: {result.stderr[:500]}")
+        return False
+
+    return output_path.exists()
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="""
 Generate Self Style preset samples with enhanced detail.
 
-Process:
-1. Extract center crop (~45%) of source image for focus
-2. Run Magenta self-style at high resolution (1440p) for detail
-3. Add small thumbnail of original in top-left corner
-4. Save at 720p final size
+Two modes:
+1. PRE-MADE: If "Image X" folders exist with "final image" files, use those directly
+2. AUTO-GENERATE: Otherwise, extract center crop and run Magenta self-style
 
-Result shows fine style details blown up from center crop.
+Pre-made folder structure:
+  self_style_samples/
+    Image 1/
+      final image.png    <- Used as preset sample
+      raw image.jpg      <- Original (reference only)
+      style image.png    <- Cropped region (reference only)
+    Image 2/
+      ...
     """)
     parser.add_argument('--force', action='store_true', help='Regenerate all samples')
     parser.add_argument('--crop-ratio', type=float, default=CENTER_CROP_RATIO,
@@ -288,7 +405,68 @@ Result shows fine style details blown up from center crop.
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Get source images - use DIFFERENT images for each preset!
+    # Check for pre-made image folders first
+    premade_folders = get_premade_image_folders()
+
+    # Get all Self Style presets from database
+    presets = get_self_style_presets()
+    if not presets:
+        print("No Self Style presets found in database")
+        return
+
+    print(f"Found {len(presets)} Self Style presets")
+
+    if premade_folders:
+        print(f"Found {len(premade_folders)} pre-made image folders with content+style!")
+        print("Will run Magenta style transfer on each.")
+        print()
+
+        success = 0
+        for idx, preset in enumerate(presets):
+            # Cycle through pre-made folders
+            premade = premade_folders[idx % len(premade_folders)]
+            output_path = OUTPUT_DIR / preset['filename']
+
+            if output_path.exists() and not args.force:
+                print(f"Skipping (exists): {preset['filename']}")
+                if not preset['has_sample']:
+                    update_sample_path(preset['id'], f"preset_samples/{preset['filename']}")
+                success += 1
+                continue
+
+            print(f"Styling: {preset['name']} (from {premade['folder'].name})")
+            print(f"  Content: {premade['content'].name}")
+            print(f"  Style:   {premade['style'].name}")
+
+            # Run Magenta style transfer with content and style images
+            temp_styled = OUTPUT_DIR / f"_temp_styled_{idx}.jpg"
+            if run_magenta_style_transfer(
+                premade['content'], premade['style'], temp_styled,
+                preset['tile'], preset['overlap'], preset['blend'],
+                scale=args.high_res
+            ):
+                # Add thumbnail overlays: content (left) + style (right)
+                if add_thumbnail_overlay(temp_styled, premade['content'], output_path, style_path=premade['style']):
+                    print(f"  -> Created: {preset['filename']} (styled + dual thumbnails)")
+                else:
+                    # Overlay failed - just use styled output
+                    shutil.move(str(temp_styled), str(output_path))
+                    print(f"  -> Created: {preset['filename']} (styled only)")
+
+                update_sample_path(preset['id'], f"preset_samples/{preset['filename']}")
+                success += 1
+            else:
+                print(f"  -> FAILED (style transfer)")
+
+            # Clean up temp file
+            if temp_styled.exists():
+                temp_styled.unlink()
+
+        print(f"\nComplete! Styled {success}/{len(presets)} samples from pre-made content+style")
+        print(f"Output directory: {OUTPUT_DIR}")
+        return
+
+    # Fall back to auto-generation mode
     source_images = get_source_images()
     if not source_images:
         print("No source images found in /app/input/")
@@ -299,15 +477,6 @@ Result shows fine style details blown up from center crop.
     random.shuffle(source_images)
     print(f"Found {len(source_images)} source images to choose from")
     print(f"Settings: center crop={args.crop_ratio*100:.0f}%, high-res={args.high_res}p")
-    print()
-
-    # Get all Self Style presets from database
-    presets = get_self_style_presets()
-    if not presets:
-        print("No Self Style presets found in database")
-        return
-
-    print(f"Found {len(presets)} Self Style presets")
     print()
 
     success = 0
