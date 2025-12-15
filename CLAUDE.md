@@ -380,3 +380,207 @@ Add `--region_seed 42` or use `--region_optimize` (auto-fixes seed)
 
 ### Magenta model errors
 Ensure `--magenta_style_X` is set for each magenta model slot
+
+### Video artifacts (vertical lines, jitter)
+The optical flow algorithm has been improved to reduce artifacts:
+- Pre-blur applied to grayscale images before flow calculation
+- Larger window size (21 vs 15) and more pyramid levels (6 vs 5)
+- Post-processing flow field smoothing to reduce vertical line artifacts
+- Cubic easing for smooth pan/zoom motion
+
+## New Server Setup
+
+### Prerequisites
+- Docker and docker-compose
+- Python 3.x with OpenCV, NumPy, PIL
+- ffmpeg for video conversion
+- Sufficient disk space for models (~2GB) and outputs
+
+### Quick Setup
+```bash
+# Clone the repository
+git clone https://github.com/TrentMahaffey/NeuralStyleTransferV1.git
+cd NeuralStyleTransferV1
+
+# Build Docker container
+docker-compose build style
+
+# Test the pipeline
+docker-compose run --rm style bash -lc "python3 /app/pipeline.py --help"
+```
+
+### Model Setup
+Models are stored in `models/` directory with subdirectories:
+- `models/pytorch/` - PyTorch transformer models (.pth)
+- `models/torch/` - Torch7 models for OpenCV DNN (.t7)
+- `models/magenta_styles/` - Style images for Magenta TF-Hub
+- `models/deeplab/` - DeepLab semantic segmentation weights
+- `models/reconet/` - ReCoNet video stylization models
+
+DeepLab weights can be downloaded from the DeepLab-ResNet repository.
+
+### Directory Structure
+```
+NeuralStyleTransferV1/
+├── pipeline.py              # Main video processing pipeline
+├── region_blend.py          # Region blending utilities
+├── sky_swap.py              # DeepLab semantic segmentation
+├── docker-compose.yml       # Docker configuration
+├── CLAUDE.md                # This documentation
+├── scripts/                 # Utility scripts
+│   ├── morph_v2.py         # Self-style morph pipeline
+│   ├── batch_selfstyle_all_images.py
+│   └── optical_flow_*.py   # Video slideshow generators
+├── input_videos/            # Input video files
+├── input/                   # Input images
+│   └── self_style_samples/ # Images for self-style processing
+├── output/                  # Generated outputs
+├── models/                  # Model weights
+└── _work/                   # Temporary frame storage
+```
+
+### Common Tasks
+
+**Run MorphV2 self-style pipeline:**
+```bash
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto --vertical"
+```
+
+**Generate batch self-style images:**
+```bash
+docker-compose run --rm style bash -lc "python /app/scripts/batch_selfstyle_all_images.py"
+```
+
+**Style a video with single model:**
+```bash
+docker-compose run --rm style bash -lc "python3 /app/pipeline.py --input_video /app/input_videos/in.mp4 --output_video /app/output/out.mp4 --model /app/models/pytorch/candy.pth --model_type transformer --io_preset raw_255 --scale 720"
+```
+
+## MorphV2 - Self-Style Morph Pipeline
+
+`scripts/morph_v2.py` - Automated self-style morph video generation from a single image.
+
+### Overview
+Given a single input image, MorphV2:
+1. Runs DeepLab semantic segmentation to detect regions (person, car, dog, etc.)
+2. Automatically selects the best region using a scoring algorithm
+3. Extracts the region as a tight crop (style source)
+4. Runs Magenta arbitrary style transfer with multiple tile/overlap configurations
+5. Generates optical flow morph video from the styled outputs
+
+### Quick Start
+
+```bash
+# Automatic mode (recommended) - detects best region automatically
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto"
+
+# Vertical video for mobile
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto --vertical"
+
+# With Ken Burns pan/zoom effect
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto --vertical --pan_zoom 2.0 --pan_direction horizontal"
+
+# Analyze image to see detected regions (no processing)
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --analyze"
+
+# Manual target selection
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --target_label person"
+
+# Skip mask, use whole image as style
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --skip_mask"
+```
+
+### Ken Burns Pan/Zoom Effect
+
+Add cinematic camera movement to morph videos with `--pan_zoom` and `--pan_direction`.
+
+```bash
+# Horizontal pan (left to right) at 2x zoom
+--pan_zoom 2.0 --pan_direction horizontal
+
+# Vertical pan (top to bottom) at 1.5x zoom
+--pan_zoom 1.5 --pan_direction vertical
+
+# Diagonal pan (top-left to bottom-right)
+--pan_zoom 2.0 --pan_direction diagonal
+
+# Reverse diagonal (top-right to bottom-left)
+--pan_zoom 2.0 --pan_direction diagonal_reverse
+```
+
+**How it works:**
+- Images are loaded at `pan_zoom` times the target resolution
+- Optical flow morphing is performed at this larger size
+- A viewport is extracted from each frame, panning across as the video progresses
+- Creates smooth camera movement through the styled artwork
+
+### PyTorch Pre-Styling
+
+Add neural style transfer before Magenta processing for richer effects:
+
+```bash
+# Random PyTorch model applied first
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto --pytorch_style"
+
+# Specific PyTorch model
+docker-compose run --rm style bash -lc "python /app/scripts/morph_v2.py --image /app/input/photo.jpg --auto --pytorch_style --pytorch_model candy"
+```
+
+Creates blend variants (0%, 25%, 50%, 75%, 100% PyTorch style) each processed through all 7 Magenta tile configurations.
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--image` | Input image path (required) | - |
+| `--auto` | Auto-detect best region | - |
+| `--target_label` | Manual region selection (person, car, dog, etc.) | - |
+| `--skip_mask` | Use whole image as style source | - |
+| `--analyze` | Show detected regions without processing | - |
+| `--vertical` | Output vertical video (720x1280) | horizontal |
+| `--scale` | Output resolution for styled images | 1440 |
+| `--blend` | Style blend ratio | 0.95 |
+| `--fps` | Video framerate | 24 |
+| `--morph_seconds` | Seconds per morph transition | 2.0 |
+| `--hold_frames` | Frames to hold on final image | 24 |
+| `--zoom` | Static zoom factor | 1.5 |
+| `--pan_zoom` | Ken Burns zoom level (e.g., 2.0) | None |
+| `--pan_direction` | Pan direction: horizontal, vertical, diagonal, diagonal_reverse | horizontal |
+| `--pytorch_style` | Pre-style with PyTorch neural style | - |
+| `--pytorch_model` | Specific PyTorch model (candy, mosaic, rain_princess, udnie) | random |
+| `--force` | Regenerate existing outputs | - |
+
+### Output Structure
+
+```
+output/morphv2/<image_name>/
+├── styled/                    # Styled images
+│   ├── <name>_tile128_overlap16.jpg
+│   ├── <name>_tile160_overlap20.jpg
+│   ├── ...
+│   └── <name>_tile512_overlap64.jpg
+├── work/                      # Intermediate files
+│   ├── mask.png              # Semantic mask
+│   ├── style_crop.jpg        # Extracted region
+│   └── style_crop_pytorch.jpg # PyTorch styled (if enabled)
+├── style_source.jpg          # Copy of style source
+└── <name>_morph.mp4          # Final morph video
+```
+
+### Region Scoring
+
+Auto mode scores regions based on:
+- **Coverage**: Sweet spot 5-40% of image (not too small, not too large)
+- **Aspect ratio**: Prefers square-ish regions
+- **Position**: Slight preference for centered regions
+- **Semantic preference**: person, animals > vehicles > furniture
+
+### Available Labels
+
+```
+background, aeroplane, bicycle, bird, boat, bottle, bus, car, cat, chair,
+cow, diningtable, dog, horse, motorbike, person, pottedplant, sheep,
+sofa, train, tvmonitor
+```
+
+Use `--list_labels` to see all available semantic labels with their IDs.

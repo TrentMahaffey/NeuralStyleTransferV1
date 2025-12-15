@@ -77,7 +77,11 @@ VOC21_LABELS = {
 
 
 def optical_flow_morph(img1, img2, num_interp_frames=72):
-    """Generate interpolated frames between two images using optical flow."""
+    """Generate interpolated frames between two images using optical flow.
+
+    Uses improved flow estimation with smoothing to reduce artifacts like
+    vertical lines that can occur with large style differences.
+    """
     h, w = img1.shape[:2]
     if img2.shape[:2] != (h, w):
         img2 = cv2.resize(img2, (w, h))
@@ -85,19 +89,30 @@ def optical_flow_morph(img1, img2, num_interp_frames=72):
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
+    # Apply slight Gaussian blur to reduce high-frequency noise that causes artifacts
+    gray1 = cv2.GaussianBlur(gray1, (5, 5), 1.0)
+    gray2 = cv2.GaussianBlur(gray2, (5, 5), 1.0)
+
+    # Use more robust flow parameters to reduce artifacts
     flow_forward = cv2.calcOpticalFlowFarneback(
         gray1, gray2, None,
-        pyr_scale=0.5, levels=5, winsize=15,
-        iterations=3, poly_n=7, poly_sigma=1.5,
+        pyr_scale=0.5, levels=6, winsize=21,  # Larger window, more levels
+        iterations=5, poly_n=7, poly_sigma=1.5,  # More iterations
         flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
     )
 
     flow_backward = cv2.calcOpticalFlowFarneback(
         gray2, gray1, None,
-        pyr_scale=0.5, levels=5, winsize=15,
-        iterations=3, poly_n=7, poly_sigma=1.5,
+        pyr_scale=0.5, levels=6, winsize=21,
+        iterations=5, poly_n=7, poly_sigma=1.5,
         flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
     )
+
+    # Smooth the flow fields to reduce artifacts (vertical lines, etc.)
+    flow_forward[:, :, 0] = cv2.GaussianBlur(flow_forward[:, :, 0], (15, 15), 3.0)
+    flow_forward[:, :, 1] = cv2.GaussianBlur(flow_forward[:, :, 1], (15, 15), 3.0)
+    flow_backward[:, :, 0] = cv2.GaussianBlur(flow_backward[:, :, 0], (15, 15), 3.0)
+    flow_backward[:, :, 1] = cv2.GaussianBlur(flow_backward[:, :, 1], (15, 15), 3.0)
 
     y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
 
@@ -272,7 +287,8 @@ def run_pytorch_style(content_path, output_path, model_name=None, scale=720, ble
 
 
 def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
-                       target_size=(720, 1280), zoom=1.5, hold_frames=24):
+                       target_size=(720, 1280), zoom=1.5, hold_frames=24,
+                       pan_zoom=None, pan_direction='horizontal'):
     """Create optical flow morph video from styled images.
 
     Args:
@@ -281,8 +297,11 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
         fps: Frames per second
         morph_seconds: Duration of each morph transition in seconds
         target_size: Video dimensions (width, height)
-        zoom: Zoom factor for images
+        zoom: Zoom factor for images (static zoom applied before pan)
         hold_frames: Number of frames to hold on final image
+        pan_zoom: Ken Burns zoom level (e.g., 2.0 = show 50% of image, pan across rest)
+                  If None, no pan effect is applied
+        pan_direction: Direction to pan - 'horizontal', 'vertical', 'diagonal', 'diagonal_reverse'
     """
     interp_frames = int(fps * morph_seconds)
 
@@ -350,45 +369,179 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
         img = img[start_y:start_y + target_h, start_x:start_x + target_w]
         return img
 
+    def load_for_pan(path):
+        """Load image scaled up for pan/zoom effect without cropping."""
+        img = cv2.imread(str(path))
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        target_w, target_h = target_size
+
+        # Apply static zoom first
+        if zoom > 1.0:
+            crop_w = int(w / zoom)
+            crop_h = int(h / zoom)
+            start_x = (w - crop_w) // 2
+            start_y = (h - crop_h) // 2
+            img = img[start_y:start_y + crop_h, start_x:start_x + crop_w]
+            h, w = img.shape[:2]
+
+        # Scale up by pan_zoom factor so we can pan across
+        # We need the image to be pan_zoom times larger than target
+        scale = max(target_w / w, target_h / h) * pan_zoom
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        return img
+
+    def ease_in_out_cubic(t):
+        """Smooth easing function: slow start, fast middle, slow end."""
+        if t < 0.5:
+            return 4 * t * t * t
+        else:
+            return 1 - pow(-2 * t + 2, 3) / 2
+
+    def extract_pan_frame(full_img, progress):
+        """Extract a frame from the panned image based on progress (0.0 to 1.0).
+
+        Uses cubic easing for smooth acceleration/deceleration to eliminate jitter.
+        """
+        target_w, target_h = target_size
+        h, w = full_img.shape[:2]
+
+        # Calculate available pan distance
+        max_pan_x = w - target_w
+        max_pan_y = h - target_h
+
+        # Apply easing for smooth motion (eliminates jitter)
+        eased = ease_in_out_cubic(progress)
+
+        # Determine pan direction
+        if pan_direction == 'horizontal':
+            # Pan left to right
+            x = int(eased * max_pan_x)
+            y = max_pan_y // 2  # Center vertically
+        elif pan_direction == 'vertical':
+            # Pan top to bottom
+            x = max_pan_x // 2  # Center horizontally
+            y = int(eased * max_pan_y)
+        elif pan_direction == 'diagonal':
+            # Pan top-left to bottom-right
+            x = int(eased * max_pan_x)
+            y = int(eased * max_pan_y)
+        elif pan_direction == 'diagonal_reverse':
+            # Pan top-right to bottom-left
+            x = int((1 - eased) * max_pan_x)
+            y = int(eased * max_pan_y)
+        else:
+            # Default: horizontal
+            x = int(eased * max_pan_x)
+            y = max_pan_y // 2
+
+        # Ensure bounds
+        x = max(0, min(x, max_pan_x))
+        y = max(0, min(y, max_pan_y))
+
+        return full_img[y:y + target_h, x:x + target_w]
+
     def get_label(idx):
         """Get label for image at index."""
         if idx < len(image_labels):
             return image_labels[idx]
         return f"image_{idx}"
 
-    total_frames = 0
-    for idx in range(len(images)):
-        curr_img = load_and_resize(images[idx])
-        if curr_img is None:
-            continue
+    # If pan_zoom is enabled, we need to pan across each morph frame
+    # Load images at pan_zoom size, morph between them, then extract panned crops
+    if pan_zoom is not None and pan_zoom > 1.0:
+        print(f"[video] Ken Burns effect enabled: {pan_zoom}x zoom, {pan_direction} pan")
 
-        print(f"  [{idx+1}/{len(images)}] {get_label(idx)}")
+        # Calculate total frames for progress tracking
+        num_transitions = len(images) - 1
+        frames_per_transition = interp_frames
+        expected_total = num_transitions * frames_per_transition + hold_frames
 
-        if idx < len(images) - 1:
-            next_img = load_and_resize(images[idx + 1])
-            if next_img is not None:
-                try:
-                    morph_frames = optical_flow_morph(curr_img, next_img, interp_frames)
-                    for frame in morph_frames:
-                        out.write(frame)
-                        total_frames += 1
-                except Exception as e:
-                    print(f"    Morph failed: {e}")
-                    for i in range(interp_frames):
-                        t = i / (interp_frames - 1)
-                        blended = cv2.addWeighted(curr_img, 1 - t, next_img, t, 0)
-                        out.write(blended)
-                        total_frames += 1
+        # Generate morphs between pan-sized images, extracting panned crops
+        global_frame = 0
+        total_frames = 0
 
-    # Add hold frames at the end
-    if hold_frames > 0 and total_frames > 0:
-        print(f"  [hold] Adding {hold_frames} hold frames at end")
-        # Get the last image
-        last_img = load_and_resize(images[-1])
-        if last_img is not None:
-            for _ in range(hold_frames):
-                out.write(last_img)
-                total_frames += 1
+        for idx in range(len(images)):
+            print(f"  [{idx+1}/{len(images)}] {get_label(idx)}")
+
+            if idx < len(images) - 1:
+                # Load both images at pan_zoom size
+                curr_pan = load_for_pan(images[idx])
+                next_pan = load_for_pan(images[idx + 1])
+
+                if curr_pan is not None and next_pan is not None:
+                    try:
+                        # Morph at the larger pan_zoom size
+                        morph_frames = optical_flow_morph(curr_pan, next_pan, interp_frames)
+
+                        # Extract panned crops from each morphed frame
+                        for frame in morph_frames:
+                            progress = global_frame / max(1, expected_total - 1)
+                            panned = extract_pan_frame(frame, progress)
+                            out.write(panned)
+                            global_frame += 1
+                            total_frames += 1
+                    except Exception as e:
+                        print(f"    Morph failed: {e}")
+                        # Fallback: crossfade with pan
+                        for i in range(interp_frames):
+                            t = i / (interp_frames - 1)
+                            blended = cv2.addWeighted(curr_pan, 1 - t, next_pan, t, 0)
+                            progress = global_frame / max(1, expected_total - 1)
+                            panned = extract_pan_frame(blended, progress)
+                            out.write(panned)
+                            global_frame += 1
+                            total_frames += 1
+
+        # Add hold frames at the end (continue panning)
+        if hold_frames > 0:
+            print(f"  [hold] Adding {hold_frames} hold frames at end")
+            last_pan = load_for_pan(images[-1])
+            if last_pan is not None:
+                for i in range(hold_frames):
+                    progress = global_frame / max(1, expected_total - 1)
+                    panned = extract_pan_frame(last_pan, progress)
+                    out.write(panned)
+                    global_frame += 1
+                    total_frames += 1
+
+    else:
+        # No pan effect - standard processing
+        total_frames = 0
+        for idx in range(len(images)):
+            curr_img = load_and_resize(images[idx])
+            if curr_img is None:
+                continue
+
+            print(f"  [{idx+1}/{len(images)}] {get_label(idx)}")
+
+            if idx < len(images) - 1:
+                next_img = load_and_resize(images[idx + 1])
+                if next_img is not None:
+                    try:
+                        morph_frames = optical_flow_morph(curr_img, next_img, interp_frames)
+                        for frame in morph_frames:
+                            out.write(frame)
+                            total_frames += 1
+                    except Exception as e:
+                        print(f"    Morph failed: {e}")
+                        for i in range(interp_frames):
+                            t = i / (interp_frames - 1)
+                            blended = cv2.addWeighted(curr_img, 1 - t, next_img, t, 0)
+                            out.write(blended)
+                            total_frames += 1
+
+        # Add hold frames at the end
+        if hold_frames > 0 and total_frames > 0:
+            print(f"  [hold] Adding {hold_frames} hold frames at end")
+            # Get the last image
+            last_img = load_and_resize(images[-1])
+            if last_img is not None:
+                for _ in range(hold_frames):
+                    out.write(last_img)
+                    total_frames += 1
 
     out.release()
 
@@ -606,6 +759,11 @@ def main():
     parser.add_argument('--num_blend_frames', type=int, default=5,
                         help='Number of blend levels between original and pytorch (default 5)')
     parser.add_argument('--zoom', type=float, default=1.5, help='Video zoom factor')
+    parser.add_argument('--pan_zoom', type=float, default=None,
+                        help='Ken Burns pan/zoom level (e.g., 2.0 = zoom in 2x and pan across image)')
+    parser.add_argument('--pan_direction', default='horizontal',
+                        choices=['horizontal', 'vertical', 'diagonal', 'diagonal_reverse'],
+                        help='Pan direction for Ken Burns effect (default: horizontal)')
     parser.add_argument('--vertical', action='store_true', help='Vertical video (720x1280)')
     parser.add_argument('--skip_mask', action='store_true', help='Skip mask step, use whole image as style')
     parser.add_argument('--skip_video', action='store_true', help='Skip video generation')
@@ -854,7 +1012,13 @@ def main():
         print(f"\n[3/3] Creating optical flow morph video...")
 
         target_size = (720, 1280) if args.vertical else (1280, 720)
-        video_path = base_output / f"{name}_morph.mp4"
+
+        # Build video filename with pan/zoom info if enabled
+        if args.pan_zoom and args.pan_zoom > 1.0:
+            zoom_str = f"{args.pan_zoom:.1f}".replace('.', 'p')
+            video_path = base_output / f"{name}_morph_{args.pan_direction}_{zoom_str}x.mp4"
+        else:
+            video_path = base_output / f"{name}_morph.mp4"
 
         if video_path.exists() and not args.force:
             print(f"  [skip] Video already exists")
@@ -865,7 +1029,9 @@ def main():
                 morph_seconds=args.morph_seconds,
                 target_size=target_size,
                 zoom=args.zoom,
-                hold_frames=args.hold_frames
+                hold_frames=args.hold_frames,
+                pan_zoom=args.pan_zoom,
+                pan_direction=args.pan_direction
             )
 
     print(f"\n{'='*60}")
