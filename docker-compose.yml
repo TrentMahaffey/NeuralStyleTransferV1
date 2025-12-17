@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: neural-style:baseV0
+    image: neural-style:gpu-cuda126
     working_dir: /app
     command: >-
       bash -lc "bash /app/morph.sh"
@@ -13,21 +13,27 @@ services:
     env_file:
       - .env
     environment:
-      OMP_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-      OPENCV_OPENCL_DEVICE: "disabled"
-      OPENCV_NUM_THREADS: "1"
-    shm_size: "2g"          # /dev/shm; 2G is a good Mac default
-    mem_limit: "8g"         # hard cap inside the Docker VM
-    mem_reservation: "4g"   # soft reservation
+      OMP_NUM_THREADS: "24"
+      OPENBLAS_NUM_THREADS: "24"
+      MKL_NUM_THREADS: "24"
+      NUMEXPR_NUM_THREADS: "24"
+      OPENCV_NUM_THREADS: "24"
+    shm_size: "16g"
+    deploy:
+      resources:
+        limits:
+          memory: 64g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   web:
     build:
       context: .
       dockerfile: Dockerfile
-    image: neural-style:baseV0
+    image: neural-style:gpu-cuda126
     working_dir: /app
     command: >-
       bash -lc "pip install flask && python /app/web/app.py"
@@ -38,13 +44,19 @@ services:
     env_file:
       - .env
     environment:
-      OMP_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-      OPENCV_OPENCL_DEVICE: "disabled"
-      OPENCV_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "24"
+      OPENBLAS_NUM_THREADS: "24"
+      MKL_NUM_THREADS: "24"
+      NUMEXPR_NUM_THREADS: "24"
+      OPENCV_NUM_THREADS: "24"
       FLASK_ENV: "development"
-    shm_size: "2g"
-    mem_limit: "8g"
-    mem_reservation: "4g"
+    shm_size: "16g"
+    deploy:
+      resources:
+        limits:
+          memory: 64g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

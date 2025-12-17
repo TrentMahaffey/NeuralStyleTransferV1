@@ -76,11 +76,248 @@ VOC21_LABELS = {
 }
 
 
-def optical_flow_morph(img1, img2, num_interp_frames=72):
+def detect_faces(image_path, confidence_threshold=0.5):
+    """Detect faces in an image using OpenCV's DNN-based face detector.
+
+    This uses a pre-trained SSD (Single Shot Detector) model that is much more
+    accurate than Haar cascades, especially for varied poses and lighting.
+
+    Args:
+        image_path: Path to the input image
+        confidence_threshold: Minimum confidence for detection (0.0-1.0, default 0.5)
+
+    Returns:
+        List of face dictionaries with keys: 'bbox' (x, y, w, h), 'center', 'area', 'confidence', 'coverage'
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        print(f"[faces] Failed to load image: {image_path}")
+        return []
+
+    h, w = img.shape[:2]
+
+    # Load DNN face detector model
+    model_dir = Path(__file__).parent.parent / "models" / "face_detector"
+    prototxt_path = model_dir / "deploy.prototxt"
+    caffemodel_path = model_dir / "res10_300x300_ssd_iter_140000.caffemodel"
+
+    if not prototxt_path.exists() or not caffemodel_path.exists():
+        print(f"[faces] Error: DNN face detector model not found at {model_dir}")
+        print("[faces] Please download the model files:")
+        print("  - deploy.prototxt")
+        print("  - res10_300x300_ssd_iter_140000.caffemodel")
+        return []
+
+    net = cv2.dnn.readNetFromCaffe(str(prototxt_path), str(caffemodel_path))
+
+    # Create blob from image (resize to 300x300 as expected by the model)
+    blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104.0, 177.0, 123.0), swapRB=False, crop=False)
+
+    # Run inference
+    net.setInput(blob)
+    detections = net.forward()
+
+    results = []
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+
+        if confidence < confidence_threshold:
+            continue
+
+        # Get bounding box coordinates (model outputs normalized coordinates)
+        x1 = int(detections[0, 0, i, 3] * w)
+        y1 = int(detections[0, 0, i, 4] * h)
+        x2 = int(detections[0, 0, i, 5] * w)
+        y2 = int(detections[0, 0, i, 6] * h)
+
+        # Clamp to image bounds
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+
+        fw = x2 - x1
+        fh = y2 - y1
+
+        if fw <= 0 or fh <= 0:
+            continue
+
+        area = fw * fh
+        coverage = area / (w * h) * 100
+        center_x = x1 + fw / 2
+        center_y = y1 + fh / 2
+
+        results.append({
+            'id': i + 1,
+            'bbox': (x1, y1, fw, fh),
+            'center': (center_x, center_y),
+            'area': area,
+            'coverage': coverage,
+            'confidence': float(confidence),
+            'aspect_ratio': fw / fh if fh > 0 else 1.0,
+        })
+
+    # Sort by area (largest first)
+    results.sort(key=lambda f: f['area'], reverse=True)
+
+    # Re-number IDs after sorting
+    for i, face in enumerate(results):
+        face['id'] = i + 1
+
+    return results
+
+
+def extract_face_region(image_path, face_bbox, output_path, padding_pct=0.3):
+    """Extract a face region with padding as a crop.
+
+    Args:
+        image_path: Path to the input image
+        face_bbox: Tuple of (x, y, w, h) for the face bounding box
+        output_path: Path to save the cropped face
+        padding_pct: Padding as percentage of face size (0.3 = 30% padding)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        return False
+
+    x, y, w, h = face_bbox
+    img_h, img_w = img.shape[:2]
+
+    # Add padding around face
+    pad_x = int(w * padding_pct)
+    pad_y = int(h * padding_pct)
+
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_y)
+    x2 = min(img_w, x + w + pad_x)
+    y2 = min(img_h, y + h + pad_y)
+
+    cropped = img[y1:y2, x1:x2]
+    cv2.imwrite(str(output_path), cropped)
+
+    crop_w, crop_h = x2 - x1, y2 - y1
+    print(f"[faces] Extracted face crop: {crop_w}x{crop_h} pixels (with {int(padding_pct*100)}% padding)")
+
+    return True
+
+
+def _ease_in_out_cubic(t):
+    """Smooth easing: slow start, fast middle, slow end."""
+    if t < 0.5:
+        return 4 * t * t * t
+    else:
+        return 1 - pow(-2 * t + 2, 3) / 2
+
+
+def _smoothstep(t):
+    """Hermite interpolation for smooth blending (S-curve)."""
+    return t * t * (3 - 2 * t)
+
+
+def _smootherstep(t):
+    """Ken Perlin's improved smoothstep - even smoother S-curve."""
+    return t * t * t * (t * (6 * t - 15) + 10)
+
+
+def temporal_smooth_frames(frames, kernel_size=3, sigma=1.0):
+    """Apply temporal smoothing to reduce frame-to-frame jitter.
+
+    Blends each frame with its neighbors using a Gaussian-weighted average.
+    This reduces micro-jitter from optical flow while preserving motion.
+
+    Args:
+        frames: List of video frames (numpy arrays)
+        kernel_size: Number of frames to blend (must be odd, default 3)
+        sigma: Gaussian sigma for weighting (higher = more blur)
+
+    Returns:
+        List of temporally smoothed frames
+    """
+    if len(frames) < kernel_size:
+        return frames
+
+    # Create Gaussian weights
+    half = kernel_size // 2
+    weights = np.array([np.exp(-((i - half) ** 2) / (2 * sigma ** 2))
+                        for i in range(kernel_size)])
+    weights = weights / weights.sum()
+
+    smoothed = []
+    for i in range(len(frames)):
+        # Gather neighboring frames
+        blended = np.zeros_like(frames[i], dtype=np.float32)
+        total_weight = 0
+
+        for j, w in enumerate(weights):
+            idx = i + j - half
+            if 0 <= idx < len(frames):
+                blended += frames[idx].astype(np.float32) * w
+                total_weight += w
+
+        # Normalize and convert back
+        blended = (blended / total_weight).astype(np.uint8)
+        smoothed.append(blended)
+
+    return smoothed
+
+
+def apply_hue_shift(frame, shift_degrees):
+    """Shift the hue of a frame by the specified degrees (0-360).
+
+    Args:
+        frame: BGR image (numpy array)
+        shift_degrees: Hue shift in degrees (0-360)
+
+    Returns:
+        Hue-shifted BGR image
+    """
+    if abs(shift_degrees) < 0.1:
+        return frame
+
+    # Convert to HSV
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # Shift hue (OpenCV hue is 0-180, so divide by 2)
+    hsv[:, :, 0] = (hsv[:, :, 0] + shift_degrees / 2) % 180
+
+    # Convert back to BGR
+    hsv = hsv.astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def calculate_zoom_pulse(progress, pulse_amplitude=0.05, pulse_frequency=2.0):
+    """Calculate zoom multiplier for breathing/pulsing effect.
+
+    Args:
+        progress: Overall video progress (0.0 to 1.0)
+        pulse_amplitude: How much to zoom in/out (0.05 = 5% variation)
+        pulse_frequency: Number of complete pulse cycles in the video
+
+    Returns:
+        Zoom multiplier (e.g., 1.05 for 5% zoom in)
+    """
+    # Use absolute sine wave for smooth breathing effect (always zoom in, never out)
+    # This avoids issues with zooming below 1.0 which causes crop failures
+    pulse = abs(np.sin(progress * pulse_frequency * 2 * np.pi))
+    return 1.0 + pulse * pulse_amplitude
+
+
+def optical_flow_morph(img1, img2, num_interp_frames=72, easing='smooth'):
     """Generate interpolated frames between two images using optical flow.
 
     Uses improved flow estimation with smoothing to reduce artifacts like
     vertical lines that can occur with large style differences.
+
+    Args:
+        img1, img2: Source and destination images
+        num_interp_frames: Number of frames to generate
+        easing: Easing mode for transitions:
+            - 'linear': No easing (abrupt)
+            - 'smooth': Cubic ease-in-out (recommended)
+            - 'smoother': Ken Perlin's smootherstep (very smooth)
     """
     h, w = img1.shape[:2]
     if img2.shape[:2] != (h, w):
@@ -114,12 +351,48 @@ def optical_flow_morph(img1, img2, num_interp_frames=72):
     flow_backward[:, :, 0] = cv2.GaussianBlur(flow_backward[:, :, 0], (15, 15), 3.0)
     flow_backward[:, :, 1] = cv2.GaussianBlur(flow_backward[:, :, 1], (15, 15), 3.0)
 
+    # Add minimum flow to ensure all pixels morph (not just areas with detected motion)
+    # This prevents static-looking regions where optical flow is near-zero
+    flow_magnitude_fwd = np.sqrt(flow_forward[:, :, 0]**2 + flow_forward[:, :, 1]**2)
+    flow_magnitude_bwd = np.sqrt(flow_backward[:, :, 0]**2 + flow_backward[:, :, 1]**2)
+
+    # Minimum displacement of 2 pixels ensures visible morphing everywhere
+    min_flow = 2.0
+
+    # For areas with low flow, add radial flow toward/from center for organic look
+    cy, cx = h / 2, w / 2
+    radial_y = (np.arange(h)[:, None] - cy) / h
+    radial_x = (np.arange(w)[None, :] - cx) / w
+
+    # Boost low-flow areas with radial displacement
+    low_flow_mask_fwd = (flow_magnitude_fwd < min_flow).astype(np.float32)
+    low_flow_mask_bwd = (flow_magnitude_bwd < min_flow).astype(np.float32)
+
+    # Add subtle radial flow where optical flow is weak
+    flow_forward[:, :, 0] += low_flow_mask_fwd * radial_x * min_flow * 2
+    flow_forward[:, :, 1] += low_flow_mask_fwd * radial_y * min_flow * 2
+    flow_backward[:, :, 0] -= low_flow_mask_bwd * radial_x * min_flow * 2
+    flow_backward[:, :, 1] -= low_flow_mask_bwd * radial_y * min_flow * 2
+
     y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+
+    # Select easing function
+    if easing == 'smoother':
+        ease_func = _smootherstep
+    elif easing == 'smooth':
+        ease_func = _ease_in_out_cubic
+    else:  # 'linear'
+        ease_func = lambda x: x
 
     frames = []
     for i in range(num_interp_frames):
-        t = i / (num_interp_frames - 1) if num_interp_frames > 1 else 0
+        # Linear progress through frames
+        t_linear = i / (num_interp_frames - 1) if num_interp_frames > 1 else 0
 
+        # Apply easing to both warp timing and blend alpha
+        t = ease_func(t_linear)
+
+        # Warp both images toward each other
         map1_x = x_coords + t * flow_forward[:, :, 0]
         map1_y = y_coords + t * flow_forward[:, :, 1]
         warped1 = cv2.remap(img1, map1_x, map1_y, cv2.INTER_LINEAR,
@@ -130,7 +403,8 @@ def optical_flow_morph(img1, img2, num_interp_frames=72):
         warped2 = cv2.remap(img2, map2_x, map2_y, cv2.INTER_LINEAR,
                            borderMode=cv2.BORDER_REFLECT)
 
-        alpha = t
+        # Use smoothstep for alpha blending (extra smooth crossfade)
+        alpha = _smoothstep(t_linear)
         blended = cv2.addWeighted(warped1, 1 - alpha, warped2, alpha, 0)
         frames.append(blended)
 
@@ -287,8 +561,10 @@ def run_pytorch_style(content_path, output_path, model_name=None, scale=720, ble
 
 
 def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
-                       target_size=(720, 1280), zoom=1.5, hold_frames=24,
-                       pan_zoom=None, pan_direction='horizontal'):
+                       target_size=(720, 1280), zoom=1.0, hold_frames=24,
+                       pan_zoom=None, pan_direction='horizontal', easing='smooth',
+                       temporal_smooth=0, zoom_pulse=0.0, zoom_pulse_freq=2.0,
+                       hue_rotate=0.0, zoom_in_pct=0.25):
     """Create optical flow morph video from styled images.
 
     Args:
@@ -297,11 +573,17 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
         fps: Frames per second
         morph_seconds: Duration of each morph transition in seconds
         target_size: Video dimensions (width, height)
-        zoom: Zoom factor for images (static zoom applied before pan)
+        zoom: Static zoom factor for images (default 1.0)
         hold_frames: Number of frames to hold on final image
         pan_zoom: Ken Burns zoom level (e.g., 2.0 = show 50% of image, pan across rest)
                   If None, no pan effect is applied
+        easing: Easing mode for transitions ('linear', 'smooth', 'smoother')
         pan_direction: Direction to pan - 'horizontal', 'vertical', 'diagonal', 'diagonal_reverse'
+        temporal_smooth: Kernel size for temporal smoothing (0=disabled, 3-5 recommended)
+        zoom_pulse: Amplitude of zoom pulsing effect (0.0=disabled, 0.03-0.08 subtle)
+        zoom_pulse_freq: Frequency of zoom pulse cycles per video
+        hue_rotate: Total hue rotation in degrees over video duration (0=disabled)
+        zoom_in_pct: Percentage of video for zoom-in phase (0.0-1.0, default 0.25)
     """
     interp_frames = int(fps * morph_seconds)
 
@@ -401,47 +683,91 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
             return 1 - pow(-2 * t + 2, 3) / 2
 
     def extract_pan_frame(full_img, progress):
-        """Extract a frame from the panned image based on progress (0.0 to 1.0).
+        """Extract a frame with zoom-in then pan effect.
 
-        Uses cubic easing for smooth acceleration/deceleration to eliminate jitter.
+        Phase 1 (0 to zoom_in_pct): Zoom in from full view to pan_zoom level
+        Phase 2 (zoom_in_pct to 1.0): Pan across at the zoomed level
+
+        Uses cubic easing for smooth motion and sub-pixel precision.
+        Uses zoom_in_pct from outer scope.
         """
         target_w, target_h = target_size
         h, w = full_img.shape[:2]
 
-        # Calculate available pan distance
-        max_pan_x = w - target_w
-        max_pan_y = h - target_h
+        # Determine which phase we're in
+        if progress < zoom_in_pct and zoom_in_pct > 0:
+            # PHASE 1: Zoom in
+            # zoom_progress goes from 0 to 1 during zoom phase
+            zoom_progress = progress / zoom_in_pct
+            eased_zoom = ease_in_out_cubic(zoom_progress)
 
-        # Apply easing for smooth motion (eliminates jitter)
-        eased = ease_in_out_cubic(progress)
+            # Calculate crop size: start with full image, shrink to target_size
+            # At zoom_progress=0: crop = full image size
+            # At zoom_progress=1: crop = target_size
+            start_crop_w = min(w, int(target_w * pan_zoom))  # Full pan area
+            start_crop_h = min(h, int(target_h * pan_zoom))
 
-        # Determine pan direction
-        if pan_direction == 'horizontal':
-            # Pan left to right
-            x = int(eased * max_pan_x)
-            y = max_pan_y // 2  # Center vertically
-        elif pan_direction == 'vertical':
-            # Pan top to bottom
-            x = max_pan_x // 2  # Center horizontally
-            y = int(eased * max_pan_y)
-        elif pan_direction == 'diagonal':
-            # Pan top-left to bottom-right
-            x = int(eased * max_pan_x)
-            y = int(eased * max_pan_y)
-        elif pan_direction == 'diagonal_reverse':
-            # Pan top-right to bottom-left
-            x = int((1 - eased) * max_pan_x)
-            y = int(eased * max_pan_y)
+            crop_w = int(start_crop_w + (target_w - start_crop_w) * eased_zoom)
+            crop_h = int(start_crop_h + (target_h - start_crop_h) * eased_zoom)
+
+            # Keep aspect ratio
+            crop_w = max(target_w, crop_w)
+            crop_h = max(target_h, crop_h)
+
+            # Center the crop during zoom
+            center_x = w / 2.0
+            center_y = h / 2.0
+
+            # Extract larger crop and resize to target
+            crop = cv2.getRectSubPix(full_img, (crop_w, crop_h), (center_x, center_y))
+            return cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+
         else:
-            # Default: horizontal
-            x = int(eased * max_pan_x)
-            y = max_pan_y // 2
+            # PHASE 2: Pan across (starting from center where zoom ended)
+            # Remap progress to 0-1 for pan phase
+            if zoom_in_pct < 1.0:
+                pan_progress = (progress - zoom_in_pct) / (1.0 - zoom_in_pct)
+            else:
+                pan_progress = 0.0
 
-        # Ensure bounds
-        x = max(0, min(x, max_pan_x))
-        y = max(0, min(y, max_pan_y))
+            # Calculate available pan distance
+            max_pan_x = w - target_w
+            max_pan_y = h - target_h
 
-        return full_img[y:y + target_h, x:x + target_w]
+            # Apply easing for smooth motion
+            eased = ease_in_out_cubic(pan_progress)
+
+            # Pan starts from CENTER (where zoom ended) and moves to edge
+            # This ensures seamless transition from zoom to pan
+            if pan_direction == 'horizontal':
+                # Start at center, pan to right edge
+                x = (max_pan_x / 2.0) + eased * (max_pan_x / 2.0)
+                y = max_pan_y / 2.0
+            elif pan_direction == 'vertical':
+                # Start at center, pan to bottom
+                x = max_pan_x / 2.0
+                y = (max_pan_y / 2.0) + eased * (max_pan_y / 2.0)
+            elif pan_direction == 'diagonal':
+                # Start at center, pan to bottom-right
+                x = (max_pan_x / 2.0) + eased * (max_pan_x / 2.0)
+                y = (max_pan_y / 2.0) + eased * (max_pan_y / 2.0)
+            elif pan_direction == 'diagonal_reverse':
+                # Start at center, pan to bottom-left
+                x = (max_pan_x / 2.0) - eased * (max_pan_x / 2.0)
+                y = (max_pan_y / 2.0) + eased * (max_pan_y / 2.0)
+            else:
+                x = (max_pan_x / 2.0) + eased * (max_pan_x / 2.0)
+                y = max_pan_y / 2.0
+
+            # Ensure bounds
+            x = max(0.0, min(x, float(max_pan_x)))
+            y = max(0.0, min(y, float(max_pan_y)))
+
+            # Calculate center point for extraction
+            center_x = x + target_w / 2.0
+            center_y = y + target_h / 2.0
+
+            return cv2.getRectSubPix(full_img, (target_w, target_h), (center_x, center_y))
 
     def get_label(idx):
         """Get label for image at index."""
@@ -454,14 +780,25 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
     if pan_zoom is not None and pan_zoom > 1.0:
         print(f"[video] Ken Burns effect enabled: {pan_zoom}x zoom, {pan_direction} pan")
 
+        # Print enabled effects
+        effects_enabled = []
+        if temporal_smooth > 0:
+            effects_enabled.append(f"temporal_smooth={temporal_smooth}")
+        if zoom_pulse > 0:
+            effects_enabled.append(f"zoom_pulse={zoom_pulse:.2f}")
+        if hue_rotate != 0:
+            effects_enabled.append(f"hue_rotate={hue_rotate:.0f}°")
+        if effects_enabled:
+            print(f"[video] Effects: {', '.join(effects_enabled)}")
+
         # Calculate total frames for progress tracking
         num_transitions = len(images) - 1
         frames_per_transition = interp_frames
         expected_total = num_transitions * frames_per_transition + hold_frames
 
-        # Generate morphs between pan-sized images, extracting panned crops
+        # Collect all frames first (for temporal smoothing and effects)
+        all_frames = []
         global_frame = 0
-        total_frames = 0
 
         for idx in range(len(images)):
             print(f"  [{idx+1}/{len(images)}] {get_label(idx)}")
@@ -474,15 +811,33 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
                 if curr_pan is not None and next_pan is not None:
                     try:
                         # Morph at the larger pan_zoom size
-                        morph_frames = optical_flow_morph(curr_pan, next_pan, interp_frames)
+                        morph_frames = optical_flow_morph(curr_pan, next_pan, interp_frames, easing=easing)
 
                         # Extract panned crops from each morphed frame
                         for frame in morph_frames:
                             progress = global_frame / max(1, expected_total - 1)
+
+                            # Apply zoom pulse if enabled
+                            if zoom_pulse > 0:
+                                pulse_zoom = calculate_zoom_pulse(progress, zoom_pulse, zoom_pulse_freq)
+                                # Scale the frame slightly based on pulse
+                                h, w = frame.shape[:2]
+                                new_w, new_h = int(w * pulse_zoom), int(h * pulse_zoom)
+                                scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                                # Center crop back to original size
+                                start_x = (new_w - w) // 2
+                                start_y = (new_h - h) // 2
+                                frame = scaled[start_y:start_y+h, start_x:start_x+w]
+
                             panned = extract_pan_frame(frame, progress)
-                            out.write(panned)
+
+                            # Apply hue rotation if enabled
+                            if hue_rotate != 0:
+                                hue_shift = progress * hue_rotate
+                                panned = apply_hue_shift(panned, hue_shift)
+
+                            all_frames.append(panned)
                             global_frame += 1
-                            total_frames += 1
                     except Exception as e:
                         print(f"    Morph failed: {e}")
                         # Fallback: crossfade with pan
@@ -491,9 +846,10 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
                             blended = cv2.addWeighted(curr_pan, 1 - t, next_pan, t, 0)
                             progress = global_frame / max(1, expected_total - 1)
                             panned = extract_pan_frame(blended, progress)
-                            out.write(panned)
+                            if hue_rotate != 0:
+                                panned = apply_hue_shift(panned, progress * hue_rotate)
+                            all_frames.append(panned)
                             global_frame += 1
-                            total_frames += 1
 
         # Add hold frames at the end (continue panning)
         if hold_frames > 0:
@@ -502,10 +858,33 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
             if last_pan is not None:
                 for i in range(hold_frames):
                     progress = global_frame / max(1, expected_total - 1)
-                    panned = extract_pan_frame(last_pan, progress)
-                    out.write(panned)
+
+                    # Apply zoom pulse to hold frames too (for consistency)
+                    frame = last_pan
+                    if zoom_pulse > 0:
+                        pulse_zoom = calculate_zoom_pulse(progress, zoom_pulse, zoom_pulse_freq)
+                        h, w = frame.shape[:2]
+                        new_w, new_h = int(w * pulse_zoom), int(h * pulse_zoom)
+                        scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                        start_x = (new_w - w) // 2
+                        start_y = (new_h - h) // 2
+                        frame = scaled[start_y:start_y+h, start_x:start_x+w]
+
+                    panned = extract_pan_frame(frame, progress)
+                    if hue_rotate != 0:
+                        panned = apply_hue_shift(panned, progress * hue_rotate)
+                    all_frames.append(panned)
                     global_frame += 1
-                    total_frames += 1
+
+        # Apply temporal smoothing if enabled
+        if temporal_smooth > 0 and len(all_frames) > temporal_smooth:
+            print(f"  [smooth] Applying temporal smoothing (kernel={temporal_smooth})...")
+            all_frames = temporal_smooth_frames(all_frames, kernel_size=temporal_smooth, sigma=1.0)
+
+        # Write all frames to video
+        total_frames = len(all_frames)
+        for frame in all_frames:
+            out.write(frame)
 
     else:
         # No pan effect - standard processing
@@ -521,7 +900,7 @@ def create_morph_video(styled_dir, output_path, fps=24, morph_seconds=2.0,
                 next_img = load_and_resize(images[idx + 1])
                 if next_img is not None:
                     try:
-                        morph_frames = optical_flow_morph(curr_img, next_img, interp_frames)
+                        morph_frames = optical_flow_morph(curr_img, next_img, interp_frames, easing=easing)
                         for frame in morph_frames:
                             out.write(frame)
                             total_frames += 1
@@ -751,19 +1130,32 @@ def main():
     parser.add_argument('--target_id', type=int, help='Target class ID (alternative to --target_label)')
     parser.add_argument('--output_dir', default=None, help='Output directory (default: output/morphv2/<name>)')
     parser.add_argument('--name', default=None, help='Output name (default: derived from image)')
+    parser.add_argument('--output_suffix', default='', help='Suffix to append to output directory name (e.g., "_v2")')
     parser.add_argument('--scale', type=int, default=1440, help='Output resolution for styled images')
     parser.add_argument('--blend', type=float, default=0.95, help='Style blend ratio')
     parser.add_argument('--fps', type=int, default=24, help='Video framerate')
     parser.add_argument('--morph_seconds', type=float, default=2.0, help='Seconds per morph transition')
+    parser.add_argument('--easing', default='smooth', choices=['linear', 'smooth', 'smoother'],
+                        help='Easing mode for morph transitions (default: smooth)')
     parser.add_argument('--hold_frames', type=int, default=24, help='Frames to hold on final image')
     parser.add_argument('--num_blend_frames', type=int, default=5,
                         help='Number of blend levels between original and pytorch (default 5)')
-    parser.add_argument('--zoom', type=float, default=1.5, help='Video zoom factor')
+    parser.add_argument('--zoom', type=float, default=1.0, help='Static video zoom factor (default: 1.0)')
     parser.add_argument('--pan_zoom', type=float, default=None,
                         help='Ken Burns pan/zoom level (e.g., 2.0 = zoom in 2x and pan across image)')
     parser.add_argument('--pan_direction', default='horizontal',
                         choices=['horizontal', 'vertical', 'diagonal', 'diagonal_reverse'],
                         help='Pan direction for Ken Burns effect (default: horizontal)')
+    parser.add_argument('--zoom_in_pct', type=float, default=0.25,
+                        help='Percentage of video for zoom-in phase (0.0-1.0, default: 0.25 = 25%%)')
+    parser.add_argument('--temporal_smooth', type=int, default=0, metavar='N',
+                        help='Temporal smoothing kernel size (odd number, 0=disabled, 3-5 recommended)')
+    parser.add_argument('--zoom_pulse', type=float, default=0.0, metavar='AMP',
+                        help='Zoom pulse amplitude (0.0=disabled, 0.03-0.08 for subtle breathing effect)')
+    parser.add_argument('--zoom_pulse_freq', type=float, default=2.0,
+                        help='Zoom pulse frequency - cycles per video (default: 2.0)')
+    parser.add_argument('--hue_rotate', type=float, default=0.0, metavar='DEG',
+                        help='Hue rotation per video cycle in degrees (0=disabled, 30-60 for subtle shift)')
     parser.add_argument('--vertical', action='store_true', help='Vertical video (720x1280)')
     parser.add_argument('--skip_mask', action='store_true', help='Skip mask step, use whole image as style')
     parser.add_argument('--skip_video', action='store_true', help='Skip video generation')
@@ -771,6 +1163,12 @@ def main():
     parser.add_argument('--list_labels', action='store_true', help='List available semantic labels')
     parser.add_argument('--analyze', action='store_true',
                         help='Analyze image and show all detected regions (no processing)')
+    parser.add_argument('--detect_faces', action='store_true',
+                        help='Use face detection instead of semantic segmentation')
+    parser.add_argument('--face_index', type=int, default=1,
+                        help='Which face to use as style source (1=largest, 2=second largest, etc.)')
+    parser.add_argument('--face_padding', type=float, default=0.3,
+                        help='Padding around face as percentage (0.3 = 30%% padding)')
     parser.add_argument('--pytorch_style', action='store_true',
                         help='Pre-style the cropped region with a random PyTorch neural style model')
     parser.add_argument('--pytorch_model', default=None,
@@ -798,28 +1196,69 @@ def main():
     # Analyze mode - just show detected regions
     if args.analyze:
         print(f"\n[analyze] Analyzing: {image_path}")
+
+        # Always run face detection
+        print("\n[analyze] Face Detection:")
+        faces = detect_faces(str(image_path))
+        if faces:
+            print(f"  Detected {len(faces)} face(s):\n")
+            print(f"  {'#':<3} {'Size':<12} {'Coverage':<10} {'Position':<20}")
+            print("  " + "-" * 50)
+            for f in faces:
+                x, y, w, h = f['bbox']
+                print(f"  {f['id']:<3} {w}x{h:<8} {f['coverage']:<10.1f}% ({x}, {y})")
+        else:
+            print("  No faces detected")
+
+        # Also run semantic segmentation
+        print("\n[analyze] Semantic Segmentation:")
         regions = analyze_all_masks(str(image_path), args.weights, resolution=512)
         if not regions:
-            print("[analyze] No semantic regions detected in image")
-            return 0
+            print("  No semantic regions detected")
+        else:
+            print(f"  Detected {len(regions)} region(s):\n")
+            print(f"  {'Rank':<5} {'Label':<15} {'Coverage':<10} {'Score':<8} {'Center':<12}")
+            print("  " + "-" * 55)
+            for i, r in enumerate(regions, 1):
+                cx, cy = r['center']
+                print(f"  {i:<5} {r['label']:<15} {r['coverage_pct']:<10.1f} {r['score']:<8.1f} ({cx:.2f}, {cy:.2f})")
 
-        print(f"\n[analyze] Detected {len(regions)} regions:\n")
-        print(f"{'Rank':<5} {'Label':<15} {'Coverage':<10} {'Score':<8} {'Center':<12}")
-        print("-" * 55)
-        for i, r in enumerate(regions, 1):
-            cx, cy = r['center']
-            print(f"{i:<5} {r['label']:<15} {r['coverage_pct']:<10.1f} {r['score']:<8.1f} ({cx:.2f}, {cy:.2f})")
+            best = select_best_region(regions, args.min_coverage, args.max_coverage)
+            if best:
+                print(f"\n[analyze] Best region for styling: {best['label']} (score={best['score']:.1f})")
 
-        best = select_best_region(regions, args.min_coverage, args.max_coverage)
-        if best:
-            print(f"\n[analyze] Best region for styling: {best['label']} (score={best['score']:.1f})")
         return 0
 
-    # Determine target class ID
+    # Determine target class ID or face
     target_id = None
     selected_label = None
+    detected_face = None  # Will hold face bbox if using face detection
 
-    if args.auto:
+    # Face detection mode
+    if args.detect_faces:
+        print(f"\n[faces] Detecting faces in image...")
+        faces = detect_faces(str(image_path))
+
+        if not faces:
+            print("[faces] No faces detected - falling back to whole image")
+            args.skip_mask = True
+        else:
+            print(f"[faces] Found {len(faces)} face(s):")
+            for f in faces:
+                x, y, w, h = f['bbox']
+                print(f"  #{f['id']}: {w}x{h} pixels, {f['coverage']:.1f}% of image")
+
+            # Select face by index (1-based)
+            face_idx = args.face_index - 1
+            if face_idx >= len(faces):
+                print(f"[faces] Requested face #{args.face_index} but only {len(faces)} found, using largest")
+                face_idx = 0
+
+            detected_face = faces[face_idx]
+            x, y, w, h = detected_face['bbox']
+            print(f"\n[faces] Selected face #{detected_face['id']}: {w}x{h} at ({x}, {y})")
+
+    elif args.auto:
         # Automatic detection mode
         print(f"\n[auto] Analyzing image for best region...")
         regions = analyze_all_masks(str(image_path), args.weights, resolution=512)
@@ -860,7 +1299,8 @@ def main():
 
     # Setup output directory
     name = args.name or image_path.stem
-    base_output = Path(args.output_dir) if args.output_dir else Path("/app/output/morphv2") / name
+    name_with_suffix = name + args.output_suffix
+    base_output = Path(args.output_dir) if args.output_dir else Path("/app/output/morphv2") / name_with_suffix
     base_output.mkdir(parents=True, exist_ok=True)
 
     styled_dir = base_output / "styled"
@@ -874,16 +1314,52 @@ def main():
     print(f"{'='*60}")
     print(f"Input: {image_path}")
     print(f"Output: {base_output}")
-    if target_id is not None:
+    if detected_face is not None:
+        x, y, w, h = detected_face['bbox']
+        print(f"Target: Face #{detected_face['id']} ({w}x{h} pixels)")
+    elif target_id is not None:
         label_name = selected_label or [k for k, v in VOC21_LABELS.items() if v == target_id][0]
         print(f"Target: {label_name} (id={target_id})")
     elif args.skip_mask:
         print(f"Mode: Whole image (no mask)")
     print()
 
-    # Step 1: Generate mask (if not skipped)
+    # Step 1: Extract style source (face, semantic mask, or whole image)
     style_image = image_path
-    if not args.skip_mask:
+
+    if detected_face is not None:
+        # Face detection mode - extract face region
+        style_image = work_dir / "style_crop.jpg"
+        if not style_image.exists() or args.force:
+            print(f"[1/3] Extracting face region as style image...")
+            success = extract_face_region(
+                image_path, detected_face['bbox'], style_image,
+                padding_pct=args.face_padding
+            )
+            if not success:
+                print("[error] Failed to extract face region")
+                return 1
+        else:
+            print("  [skip] Face crop already exists")
+
+        # Optional: Apply PyTorch neural style to the cropped face
+        if args.pytorch_style:
+            pytorch_styled_path = work_dir / "style_crop_pytorch.jpg"
+            if not pytorch_styled_path.exists() or args.force:
+                success, model_used = run_pytorch_style(
+                    style_image, pytorch_styled_path,
+                    model_name=args.pytorch_model,
+                    blend=0.95
+                )
+                if success:
+                    print(f"[1/3] PyTorch styled with '{model_used}' model")
+                else:
+                    print("[1/3] PyTorch styling failed, will skip blend variants")
+            else:
+                print(f"  [skip] PyTorch styled crop already exists")
+
+    elif not args.skip_mask:
+        # Semantic segmentation mode
         mask_path = work_dir / "mask.png"
         print(f"[1/3] Generating semantic mask for class {target_id}...")
 
@@ -936,7 +1412,7 @@ def main():
     pytorch_crop = work_dir / "style_crop_pytorch.jpg"
 
     if args.pytorch_style and pytorch_crop.exists() and original_crop.exists():
-        # Create blend style source images and run each through Magenta with ALL tile configs
+        # Create blend style source images and run each through style transfer with ALL tile configs
         blend_ratios = [0, 25, 50, 75, 100]  # 0% = pure original, 100% = pure pytorch
         total_blend_outputs = len(blend_ratios) * len(TILE_CONFIGS)
 
@@ -962,7 +1438,7 @@ def main():
                     cv2.imwrite(str(blend_style_path), blended)
                     print(f"  Created blend style source: {ratio}% pytorch")
 
-                # Run Magenta with ALL tile configs for this blend
+                # Run style transfer with ALL tile configs for this blend
                 print(f"  Processing blend {ratio}% ({len(TILE_CONFIGS)} tiles)...")
                 for tile, overlap in TILE_CONFIGS:
                     output_name = f"{name}_blend{ratio}_tile{tile}_overlap{overlap}.jpg"
@@ -984,7 +1460,7 @@ def main():
                     else:
                         print(f"    FAILED: {output_name}")
 
-    # Always run standard Magenta tile configs with original crop as style
+    # Run Magenta style transfer
     print(f"\n[2/3] Running standard Magenta style transfer ({len(TILE_CONFIGS)} tile configs)...")
 
     for tile, overlap in TILE_CONFIGS:
@@ -1008,17 +1484,17 @@ def main():
             print(f"    FAILED: {output_name}")
 
     # Step 3: Generate optical flow morph video
+    # Build video filename with pan/zoom info if enabled
+    if args.pan_zoom and args.pan_zoom > 1.0:
+        zoom_str = f"{args.pan_zoom:.1f}".replace('.', 'p')
+        video_path = base_output / f"{name}_morph_{args.pan_direction}_{zoom_str}x.mp4"
+    else:
+        video_path = base_output / f"{name}_morph.mp4"
+
     if not args.skip_video:
         print(f"\n[3/3] Creating optical flow morph video...")
 
         target_size = (720, 1280) if args.vertical else (1280, 720)
-
-        # Build video filename with pan/zoom info if enabled
-        if args.pan_zoom and args.pan_zoom > 1.0:
-            zoom_str = f"{args.pan_zoom:.1f}".replace('.', 'p')
-            video_path = base_output / f"{name}_morph_{args.pan_direction}_{zoom_str}x.mp4"
-        else:
-            video_path = base_output / f"{name}_morph.mp4"
 
         if video_path.exists() and not args.force:
             print(f"  [skip] Video already exists")
@@ -1031,7 +1507,13 @@ def main():
                 zoom=args.zoom,
                 hold_frames=args.hold_frames,
                 pan_zoom=args.pan_zoom,
-                pan_direction=args.pan_direction
+                pan_direction=args.pan_direction,
+                easing=args.easing,
+                temporal_smooth=args.temporal_smooth,
+                zoom_pulse=args.zoom_pulse,
+                zoom_pulse_freq=args.zoom_pulse_freq,
+                hue_rotate=args.hue_rotate,
+                zoom_in_pct=args.zoom_in_pct
             )
 
     print(f"\n{'='*60}")
@@ -1039,7 +1521,7 @@ def main():
     print(f"{'='*60}")
     print(f"Styled images: {styled_dir}")
     if not args.skip_video:
-        print(f"Video: {base_output / f'{name}_morph.mp4'}")
+        print(f"Video: {video_path}")
     print()
 
     return 0

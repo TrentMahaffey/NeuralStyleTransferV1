@@ -93,6 +93,14 @@ def _try_import_tf():
     try:
         import tensorflow as tf  # type: ignore
         import tensorflow_hub as hub  # type: ignore
+        # Disable TensorFlow GPU - Blackwell (compute capability 12.0) not supported yet
+        # TensorFlow's PTX JIT compilation fails with CUDA_ERROR_INVALID_PTX
+        # Force CPU mode (fast enough on multi-core CPUs, ~24 threads)
+        try:
+            tf.config.set_visible_devices([], 'GPU')
+            print("[magenta] TensorFlow GPU disabled (Blackwell not supported), using CPU")
+        except Exception:
+            pass  # May fail if no GPU present
         return tf, hub
     except Exception as e:
         print(f"[magenta][WARN] TensorFlow not available: {e}")
