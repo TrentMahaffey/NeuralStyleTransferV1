@@ -12,8 +12,11 @@ Usage:
 """
 
 import argparse
+import json
 import os
+import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,6 +34,257 @@ from morph_v2 import (
     detect_faces, extract_face_region, run_magenta_style, run_pytorch_style,
     TILE_CONFIGS, PYTORCH_MODELS, _smootherstep
 )
+
+
+def save_run_log(output_path, args_dict, faces_info, output_video, duration_sec):
+    """Save a JSON log of the run parameters and results."""
+    log_path = output_path.parent / f"{output_path.stem}_run.json"
+
+    log_data = {
+        "timestamp": datetime.now().isoformat(),
+        "script": "morph_faces.py",
+        "input_image": str(args_dict.get('image_path', '')),
+        "output_video": str(output_video) if output_video else None,
+        "duration_seconds": round(duration_sec, 2),
+        "parameters": {
+            "min_coverage": args_dict.get('min_coverage'),
+            "confidence_threshold": args_dict.get('confidence_threshold'),
+            "iou_threshold": args_dict.get('iou_threshold'),
+            "scale": args_dict.get('scale'),
+            "blend": args_dict.get('blend'),
+            "fps": args_dict.get('fps'),
+            "zoom_in_duration": args_dict.get('zoom_in_duration'),
+            "zoom_out_duration": args_dict.get('zoom_out_duration'),
+            "transition_duration": args_dict.get('transition_duration'),
+            "morph_time": args_dict.get('morph_time'),
+            "min_zoom": args_dict.get('min_zoom'),
+            "max_zoom": args_dict.get('max_zoom'),
+            "vertical": args_dict.get('vertical'),
+            "face_padding": args_dict.get('face_padding'),
+            "pytorch_style": args_dict.get('pytorch_style'),
+            "blob_mode": args_dict.get('blob_mode'),
+            "num_blobs": args_dict.get('num_blobs'),
+            "blob_frequency": args_dict.get('blob_frequency'),
+            "blob_speed": args_dict.get('blob_speed'),
+            "blob_feather": args_dict.get('blob_feather'),
+            "selected_models": args_dict.get('selected_models'),
+            "selected_tiles": args_dict.get('selected_tiles'),
+        },
+        "faces_detected": len(faces_info),
+        "faces": faces_info,
+    }
+
+    with open(log_path, 'w') as f:
+        json.dump(log_data, f, indent=2)
+
+    print(f"  [log] Saved run parameters to {log_path.name}")
+    return log_path
+
+
+def create_soft_multi_blob_masks(H, W, frame_idx, num_blobs=4, frequency=2.5, speed=1.0, seed=42, feather=0.3):
+    """Create soft multi-blob masks with gaussian-like smooth transitions between regions.
+
+    Returns array of shape (num_blobs, H, W) with soft blend weights for each blob.
+    """
+    time_offset = frame_idx * speed * 0.02
+
+    y_norm = np.linspace(0, 1, H, dtype=np.float32)[:, None]
+    x_norm = np.linspace(0, 1, W, dtype=np.float32)[None, :]
+
+    blob_values = np.zeros((num_blobs, H, W), dtype=np.float32)
+
+    for blob_idx in range(num_blobs):
+        np.random.seed(seed + blob_idx * 1000)
+        noise = np.zeros((H, W), dtype=np.float32)
+        blob_phase = blob_idx * 2 * np.pi / num_blobs
+
+        for octave in range(4):
+            freq = frequency * (2 ** octave)
+            amp = 1.0 / (1.5 ** octave)
+            phase_x = np.random.random() * 2 * np.pi
+            phase_y = np.random.random() * 2 * np.pi
+            phase_t = np.random.random() * 2 * np.pi
+
+            noise += amp * np.sin(y_norm * freq * np.pi + phase_y + time_offset * (1 + octave * 0.3) + blob_phase)
+            noise += amp * np.sin(x_norm * freq * np.pi + phase_x + time_offset * (1.2 + octave * 0.2) + blob_phase)
+            noise += amp * 0.5 * np.sin((x_norm + y_norm) * freq * np.pi + phase_t + time_offset * 1.5 + blob_phase)
+
+        blob_values[blob_idx] = noise
+
+    # Softmax-like weighting with temperature control for gaussian-like feathering
+    temperature = max(0.1, feather * 5)  # Higher = softer boundaries
+    blob_values = blob_values - blob_values.max(axis=0, keepdims=True)  # Numerical stability
+    exp_values = np.exp(blob_values / temperature)
+    weights = exp_values / (exp_values.sum(axis=0, keepdims=True) + 1e-6)
+
+    return weights.astype(np.float32)
+
+
+def get_blended_image(images, position):
+    """Get smoothly interpolated image at fractional position."""
+    num_images = len(images)
+    pos = position % num_images
+
+    idx1 = int(pos)
+    idx2 = (idx1 + 1) % num_images
+    blend = pos - idx1
+
+    img1 = images[idx1]
+    img2 = images[idx2]
+
+    if img1.shape != img2.shape:
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
+
+    return cv2.addWeighted(img1, 1 - blend, img2, blend, 0)
+
+
+def create_blob_face_morph(
+    styled_images,
+    original_image,
+    target_size=(720, 1280),
+    min_zoom=1.0,
+    max_zoom=3.0,
+    fps=24,
+    morph_time=0.5,
+    zoom_center=None,
+    num_blobs=4,
+    blob_frequency=2.5,
+    blob_speed=1.0,
+    blob_feather=0.3,
+    blend_to_original=True
+):
+    """Create face morph video with blob-based gaussian blending.
+
+    Multiple blob regions show different styled images at different phases,
+    creating organic blending between styles with smooth gaussian transitions.
+
+    Args:
+        styled_images: List of styled image paths
+        original_image: Path to original unstyled image
+        target_size: (width, height) of output
+        min_zoom: Ending zoom level
+        max_zoom: Starting zoom level
+        fps: Frames per second
+        morph_time: Seconds per image transition (0.5 = half second between images)
+        zoom_center: (x, y) normalized center for zoom
+        num_blobs: Number of blob regions (4-8 recommended)
+        blob_frequency: Blob detail level (2-4 recommended)
+        blob_speed: Blob animation speed
+        blob_feather: Softness of blob boundaries (0.2-0.5 recommended)
+        blend_to_original: If True, blend to original at end
+
+    Returns:
+        List of frames
+    """
+    # Load all styled images
+    images = []
+    for img_path in styled_images:
+        img = cv2.imread(str(img_path))
+        if img is not None:
+            images.append(img)
+
+    if not images:
+        return []
+
+    # Load original image
+    if isinstance(original_image, np.ndarray):
+        orig_img = original_image.copy()
+    else:
+        orig_img = cv2.imread(str(original_image))
+
+    num_images = len(images)
+    safe_min_zoom = calculate_safe_zoom(zoom_center, min_zoom)
+
+    # Calculate duration: each image pair transition takes morph_time seconds
+    # Total morph phase is 80% of video, blend to original is 20%
+    morph_duration = num_images * morph_time
+    if blend_to_original:
+        total_duration = morph_duration / 0.8  # Add 20% for original blend
+    else:
+        total_duration = morph_duration
+
+    num_frames = int(total_duration * fps)
+    morph_end_t = 0.8 if blend_to_original else 1.0
+
+    frames = []
+
+    for frame_idx in range(num_frames):
+        t = frame_idx / max(1, num_frames - 1)
+        t_eased = _smootherstep(t)
+
+        # Zoom OUT: from max_zoom to safe_min_zoom
+        zoom = max_zoom - t_eased * (max_zoom - safe_min_zoom)
+
+        if t < morph_end_t:
+            # Phase 1: Blob-based morph through styled images
+            morph_t = t / morph_end_t
+
+            # Get blob masks for this frame
+            H, W = images[0].shape[:2]
+            blob_masks = create_soft_multi_blob_masks(
+                H, W, frame_idx,
+                num_blobs=num_blobs,
+                frequency=blob_frequency,
+                speed=blob_speed,
+                feather=blob_feather
+            )
+
+            # Create blended frame using blobs
+            blended = np.zeros((H, W, 3), dtype=np.float32)
+
+            for blob_idx in range(num_blobs):
+                # Each blob moves through images at different phase offset
+                phase_offset = blob_idx / num_blobs
+                # Position in image sequence
+                pos = morph_t * (num_images - 1) + phase_offset * num_images
+
+                # Get smooth blended image at this position
+                img = get_blended_image(images, pos)
+
+                # Resize if needed
+                if img.shape[:2] != (H, W):
+                    img = cv2.resize(img, (W, H))
+
+                # Apply blob mask with gaussian weighting
+                mask_3ch = blob_masks[blob_idx][:, :, np.newaxis]
+                blended += img.astype(np.float32) * mask_3ch
+
+            styled = blended.astype(np.uint8)
+            frame = apply_zoom_crop(styled, zoom, zoom_center, target_size)
+
+        else:
+            # Phase 2: Blend from styled to original
+            blend_t = (t - morph_end_t) / (1.0 - morph_end_t)
+            blend_t_eased = _smootherstep(blend_t)
+
+            # Use final blended styled frame
+            H, W = images[0].shape[:2]
+            blob_masks = create_soft_multi_blob_masks(
+                H, W, frame_idx,
+                num_blobs=num_blobs,
+                frequency=blob_frequency,
+                speed=blob_speed,
+                feather=blob_feather
+            )
+
+            blended = np.zeros((H, W, 3), dtype=np.float32)
+            for blob_idx in range(num_blobs):
+                phase_offset = blob_idx / num_blobs
+                pos = (num_images - 1) + phase_offset * num_images
+                img = get_blended_image(images, pos)
+                if img.shape[:2] != (H, W):
+                    img = cv2.resize(img, (W, H))
+                mask_3ch = blob_masks[blob_idx][:, :, np.newaxis]
+                blended += img.astype(np.float32) * mask_3ch
+
+            styled_frame = apply_zoom_crop(blended.astype(np.uint8), zoom, zoom_center, target_size)
+            orig_frame = apply_zoom_crop(orig_img, zoom, zoom_center, target_size)
+
+            frame = cv2.addWeighted(styled_frame, 1 - blend_t_eased, orig_frame, blend_t_eased, 0)
+
+        frames.append(frame)
+
+    return frames
 
 
 def filter_overlapping_faces(faces, iou_threshold=0.3):
@@ -551,7 +805,15 @@ def process_image(
     vertical=True,
     force=False,
     face_padding=0.6,
-    pytorch_style=True
+    pytorch_style=True,
+    morph_time=0.0,
+    blob_mode=False,
+    num_blobs=4,
+    blob_frequency=2.5,
+    blob_speed=1.0,
+    blob_feather=0.3,
+    selected_models=None,
+    selected_tiles=None
 ):
     """Process a single image: detect faces, style each, create morph video.
 
@@ -625,15 +887,22 @@ def process_image(
 
     # Step 2: For each face, extract and run all tile configs
     # Build list of style sources (original + PyTorch pre-styled variants)
+    # Use selected_models if provided, otherwise fall back to PYTORCH_MODELS
+    models_to_use = selected_models if selected_models else PYTORCH_MODELS
+    tiles_to_use = selected_tiles if selected_tiles else TILE_CONFIGS
+
     style_sources = [('none', None)]  # (prefix, model_name)
-    if pytorch_style:
-        for model_name in PYTORCH_MODELS:
+    if pytorch_style and models_to_use:
+        for model_name in models_to_use:
             style_sources.append((model_name, model_name))
 
-    num_configs = len(TILE_CONFIGS) * len(style_sources)
+    num_configs = len(tiles_to_use) * len(style_sources)
     print(f"\n[2/3] Styling each face with {num_configs} configurations...")
-    if pytorch_style:
-        print(f"       (7 tiles × {len(style_sources)} style sources: none + {', '.join(PYTORCH_MODELS)})")
+    if pytorch_style and models_to_use:
+        model_names = [m for m in models_to_use]
+        print(f"       ({len(tiles_to_use)} tiles × {len(style_sources)} style sources: none + {len(model_names)} models)")
+        if len(model_names) <= 10:
+            print(f"       Models: {', '.join(model_names)}")
 
     face_styled_images = {}  # face_id -> list of styled image paths
     face_last_images = {}    # face_id -> last styled image (for transitions)
@@ -656,8 +925,8 @@ def process_image(
 
         # Create PyTorch pre-styled face crops if enabled
         pytorch_crops = {}  # model_name -> path
-        if pytorch_style:
-            for model_name in PYTORCH_MODELS:
+        if pytorch_style and models_to_use:
+            for model_name in models_to_use:
                 pytorch_crop_path = work_dir / f"face{face_id}_crop_{model_name}.jpg"
                 if not pytorch_crop_path.exists() or force:
                     print(f"    [pytorch] Pre-styling face {face_id} with {model_name}...")
@@ -684,15 +953,18 @@ def process_image(
                 style_source = pytorch_crops[model_name]
                 name_prefix = f"{model_name}_"
 
-            for tile, overlap in TILE_CONFIGS:
+            for tile, overlap in tiles_to_use:
                 output_name = f"face{face_id}_{name_prefix}tile{tile}_overlap{overlap}.jpg"
                 output_path = face_dir / output_name
 
                 if output_path.exists() and not force:
                     print(f"    [skip] {output_name}")
                 else:
+                    # Style the FACE CROP (not full image) using style_source
+                    # For 'none' prefix: self-style the face crop
+                    # For pytorch prefix: use pytorch-styled face as both content and style
                     success = run_magenta_style(
-                        image_path, style_source, output_path,
+                        face_crop_path, style_source, output_path,
                         tile=tile, overlap=overlap, scale=scale, blend=blend
                     )
                     if success:
@@ -715,8 +987,23 @@ def process_image(
     # Simple flow:
     # 1. Each face: Start zoomed in at max zoom + smallest tile, zoom out to min zoom + largest tile
     # 2. Crossfade to next face and repeat
-    zoom_duration = zoom_in_duration + zoom_out_duration  # Combine both params for zoom out duration
-    print(f"\n[3/3] Creating face zoom-out video...")
+
+    # Calculate zoom duration based on morph_time if specified
+    # morph_time = seconds per image transition
+    first_face_id = list(face_styled_images.keys())[0] if face_styled_images else None
+    num_styled = len(face_styled_images[first_face_id]) if first_face_id else 0
+
+    if blob_mode:
+        # Blob mode with gaussian blending - use morph_time per image
+        actual_morph_time = morph_time if morph_time > 0 else 0.5  # Default 0.5s per image in blob mode
+        print(f"\n[3/3] Creating BLOB face morph ({num_styled} images × {actual_morph_time}s, {num_blobs} blobs, feather={blob_feather})...")
+    elif morph_time > 0:
+        # Calculate zoom duration from morph_time
+        zoom_duration = (num_styled * morph_time) / 0.8
+        print(f"\n[3/3] Creating face zoom-out video ({num_styled} images × {morph_time}s = {zoom_duration:.1f}s per face)...")
+    else:
+        zoom_duration = zoom_in_duration + zoom_out_duration  # Combine both params for zoom out duration
+        print(f"\n[3/3] Creating face zoom-out video...")
 
     all_frames = []
     face_ids = sorted(face_styled_images.keys())
@@ -730,18 +1017,41 @@ def process_image(
         zoom_center = face_centers.get(face_id)
         is_last = (i == len(face_ids) - 1)
 
-        # ZOOM OUT: Start at max zoom + smallest tile, zoom out to min zoom + original
-        print(f"  [face {face_id}] Zoom out {zoom_duration}s: {max_zoom}x -> {min_zoom}x + morph -> original (center: {zoom_center[0]:.2f}, {zoom_center[1]:.2f})...")
-        zoom_frames = create_face_zoom_out(
-            styled_paths,
-            image_path,  # Original image for blend at end
-            target_size=target_size,
-            min_zoom=min_zoom,
-            max_zoom=max_zoom,
-            fps=fps,
-            duration=zoom_duration,
-            zoom_center=zoom_center
-        )
+        if blob_mode:
+            # Use blob-based gaussian blending
+            actual_morph_time = morph_time if morph_time > 0 else 0.5
+            total_duration = (len(styled_paths) * actual_morph_time) / 0.8
+            print(f"  [face {face_id}] Blob morph {total_duration:.1f}s: {max_zoom}x -> {min_zoom}x with {num_blobs} blobs (center: {zoom_center[0]:.2f}, {zoom_center[1]:.2f})...")
+            zoom_frames = create_blob_face_morph(
+                styled_paths,
+                image_path,
+                target_size=target_size,
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
+                fps=fps,
+                morph_time=actual_morph_time,
+                zoom_center=zoom_center,
+                num_blobs=num_blobs,
+                blob_frequency=blob_frequency,
+                blob_speed=blob_speed,
+                blob_feather=blob_feather,
+                blend_to_original=True
+            )
+        else:
+            # Original zoom-out mode
+            if morph_time > 0:
+                zoom_duration = (len(styled_paths) * morph_time) / 0.8
+            print(f"  [face {face_id}] Zoom out {zoom_duration}s: {max_zoom}x -> {min_zoom}x + morph -> original (center: {zoom_center[0]:.2f}, {zoom_center[1]:.2f})...")
+            zoom_frames = create_face_zoom_out(
+                styled_paths,
+                image_path,  # Original image for blend at end
+                target_size=target_size,
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
+                fps=fps,
+                duration=zoom_duration,
+                zoom_center=zoom_center
+            )
         all_frames.extend(zoom_frames)
 
         # CROSSFADE to next face (if not last)
@@ -770,7 +1080,10 @@ def process_image(
         return None
 
     # Write video
-    output_video = base_output / f"{name}_faces_zoom.mp4"
+    if blob_mode:
+        output_video = base_output / f"{name}_faces_blob.mp4"
+    else:
+        output_video = base_output / f"{name}_faces_zoom.mp4"
     temp_video = work_dir / "temp_raw.mp4"
 
     # Write raw video
@@ -797,6 +1110,44 @@ def process_image(
     print(f"  Frames: {len(all_frames)}")
     print(f"  Duration: {total_duration:.1f}s")
     print(f"{'='*60}")
+
+    # Save run log
+    args_dict = {
+        'image_path': str(image_path),
+        'min_coverage': min_coverage,
+        'confidence_threshold': confidence_threshold,
+        'iou_threshold': iou_threshold,
+        'scale': scale,
+        'blend': blend,
+        'fps': fps,
+        'zoom_in_duration': zoom_in_duration,
+        'zoom_out_duration': zoom_out_duration,
+        'transition_duration': transition_duration,
+        'morph_time': morph_time,
+        'min_zoom': min_zoom,
+        'max_zoom': max_zoom,
+        'vertical': vertical,
+        'face_padding': face_padding,
+        'pytorch_style': pytorch_style,
+        'blob_mode': blob_mode,
+        'num_blobs': num_blobs,
+        'blob_frequency': blob_frequency,
+        'blob_speed': blob_speed,
+        'blob_feather': blob_feather,
+        'selected_models': selected_models,
+        'selected_tiles': [(t, o) for t, o in selected_tiles] if selected_tiles else None,
+    }
+    faces_info = [
+        {
+            'id': f['id'],
+            'bbox': f['bbox'],
+            'coverage': round(f['coverage'], 2),
+            'confidence': round(f.get('confidence', 0), 3),
+            'center': list(f['center']),
+        }
+        for f in valid_faces
+    ]
+    save_run_log(output_video, args_dict, faces_info, output_video, total_duration)
 
     return output_video
 
@@ -826,10 +1177,23 @@ def main():
                         help='Seconds to morph tiles per face (default: 2.0)')
     parser.add_argument('--transition', type=float, default=2.0,
                         help='Seconds to crossfade between faces (default: 2.0)')
+    parser.add_argument('--morph_time', type=float, default=0.0,
+                        help='Seconds per image transition (0=auto based on zoom_in+zoom_out, 0.5=half second per image)')
     parser.add_argument('--min_zoom', type=float, default=1.0,
                         help='Starting/ending zoom level (default: 1.0)')
     parser.add_argument('--max_zoom', type=float, default=4.0,
                         help='Zoom level while morphing faces (default: 4.0)')
+    # Blob mode options
+    parser.add_argument('--blob', action='store_true',
+                        help='Enable blob mode with gaussian-weighted blending')
+    parser.add_argument('--num_blobs', type=int, default=4,
+                        help='Number of blob regions (default: 4)')
+    parser.add_argument('--blob_frequency', type=float, default=2.5,
+                        help='Blob detail level (default: 2.5)')
+    parser.add_argument('--blob_speed', type=float, default=1.0,
+                        help='Blob animation speed (default: 1.0)')
+    parser.add_argument('--blob_feather', type=float, default=0.3,
+                        help='Blob boundary softness (default: 0.3)')
     parser.add_argument('--vertical', action='store_true',
                         help='Vertical video (720x1280)')
     parser.add_argument('--face_padding', type=float, default=0.6,
@@ -838,10 +1202,76 @@ def main():
                         help='Pre-style face crops with PyTorch NST models (default: enabled)')
     parser.add_argument('--no_pytorch_style', action='store_true',
                         help='Disable PyTorch NST pre-styling')
+    # Model and tile control
+    parser.add_argument('--models', type=str, default=None,
+                        help='Comma-separated list of PyTorch models to use (e.g., "candy,mosaic,udnie"). Use "all" for all models.')
+    parser.add_argument('--max_models', type=int, default=None,
+                        help='Maximum number of PyTorch models to use (random sample if exceeds)')
+    parser.add_argument('--tiles', type=str, default=None,
+                        help='Comma-separated list of tile sizes to use (e.g., "128,256,512"). Default: all 7 tiles.')
+    parser.add_argument('--list_models', action='store_true',
+                        help='List available PyTorch models and exit')
+    parser.add_argument('--list_tiles', action='store_true',
+                        help='List available tile configurations and exit')
     parser.add_argument('--force', action='store_true',
                         help='Force regenerate existing outputs')
 
     args = parser.parse_args()
+
+    # Handle --list_models and --list_tiles
+    if args.list_models:
+        print("Available PyTorch models:")
+        print("  Base models: candy, mosaic, rain_princess, udnie")
+        print("\n  All models:")
+        for i, model in enumerate(PYTORCH_MODELS, 1):
+            print(f"    {i:2d}. {model}")
+        print(f"\n  Total: {len(PYTORCH_MODELS)} models")
+        return 0
+
+    if args.list_tiles:
+        print("Available tile configurations:")
+        for tile, overlap in TILE_CONFIGS:
+            print(f"  tile={tile}, overlap={overlap}")
+        print(f"\n  Total: {len(TILE_CONFIGS)} configurations")
+        return 0
+
+    # Parse and filter models
+    selected_models = None
+    if args.models:
+        if args.models.lower() == 'all':
+            selected_models = list(PYTORCH_MODELS)
+        else:
+            model_list = [m.strip() for m in args.models.split(',')]
+            selected_models = []
+            for m in model_list:
+                if m in PYTORCH_MODELS:
+                    selected_models.append(m)
+                else:
+                    print(f"[warning] Unknown model '{m}', skipping. Use --list_models to see available models.")
+            if not selected_models:
+                print("[error] No valid models specified")
+                return 1
+    elif args.pytorch_style and not args.no_pytorch_style:
+        selected_models = list(PYTORCH_MODELS)
+
+    # Apply max_models limit
+    if selected_models and args.max_models and args.max_models < len(selected_models):
+        print(f"[info] Randomly sampling {args.max_models} models from {len(selected_models)} available")
+        selected_models = random.sample(selected_models, args.max_models)
+
+    # Parse and filter tiles
+    selected_tiles = None
+    if args.tiles:
+        tile_list = [int(t.strip()) for t in args.tiles.split(',')]
+        selected_tiles = []
+        for tile, overlap in TILE_CONFIGS:
+            if tile in tile_list:
+                selected_tiles.append((tile, overlap))
+        if not selected_tiles:
+            print(f"[error] No valid tiles specified. Available: {[t for t,o in TILE_CONFIGS]}")
+            return 1
+    else:
+        selected_tiles = list(TILE_CONFIGS)
 
     # Get list of images to process
     if args.image:
@@ -882,7 +1312,15 @@ def main():
             vertical=args.vertical,
             force=args.force,
             face_padding=args.face_padding,
-            pytorch_style=args.pytorch_style and not args.no_pytorch_style
+            pytorch_style=args.pytorch_style and not args.no_pytorch_style,
+            morph_time=args.morph_time,
+            blob_mode=args.blob,
+            num_blobs=args.num_blobs,
+            blob_frequency=args.blob_frequency,
+            blob_speed=args.blob_speed,
+            blob_feather=args.blob_feather,
+            selected_models=selected_models,
+            selected_tiles=selected_tiles
         )
         if result:
             results.append(result)

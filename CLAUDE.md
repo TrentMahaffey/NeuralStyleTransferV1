@@ -429,6 +429,7 @@ NeuralStyleTransferV1/
 ├── CLAUDE.md                # This documentation
 ├── scripts/                 # Utility scripts
 │   ├── morph_v2.py         # Self-style morph pipeline
+│   ├── style_morph.py      # Cross-image weight flow morph
 │   ├── batch_selfstyle_all_images.py
 │   └── optical_flow_*.py   # Video slideshow generators
 ├── input_videos/            # Input video files
@@ -584,3 +585,303 @@ sofa, train, tvmonitor
 ```
 
 Use `--list_labels` to see all available semantic labels with their IDs.
+
+## Multi-Model Video Pipeline
+
+Full pipeline for styling videos with multiple models (udnie, mosaic, tenharmsel) blended together with Gaussian pulses for a dynamic, evolving style effect.
+
+### Pipeline Overview
+
+1. **Extract frames** from video at 8fps
+2. **Style frames** with multiple models and weight variants
+3. **Create walk files** for weight interpolation
+4. **Compose video** with crossfades and Gaussian pulsing between styles
+
+### Quick Start
+
+```bash
+# Full pipeline: extract + style + compose
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_video_pipeline.py \
+  --video /project/input.mp4 \
+  --output_dir /project/output \
+  --output_name my_video \
+  --styled_start 17 --styled_end 160
+
+# Then compose the video
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/multi_model_video.py \
+  --orig_dir /project/output/my_video/frames \
+  --styled_udnie /project/output/my_video/styled_udnie \
+  --styled_mosaic /project/output/my_video/styled_mosaic \
+  --styled_tenharmsel /project/output/my_video/styled_tenharmsel \
+  --output /project/output/my_video.mp4 \
+  --styled_start 17 --styled_end 160
+```
+
+### Scripts
+
+#### `scripts/style_video_pipeline.py`
+
+Full styling pipeline - extracts frames and styles with all models.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--video` | Input video path | required |
+| `--output_dir` | Output directory | required |
+| `--output_name` | Name for output folder/video | required |
+| `--styled_start` | First frame to style | 17 (skip 2s) |
+| `--styled_end` | Last frame to style | 160 (20s) |
+| `--fps_extract` | Frame extraction rate | 8 |
+| `--size` | Output resolution | 1080 |
+| `--no_tenharmsel` | Skip tenharmsel styling | false |
+
+**Frame math at 8fps:**
+- 2 seconds = 16 frames (original intro)
+- 20 seconds = 160 frames
+- `--styled_start 17` skips 2s for fade-in from original
+
+#### `scripts/multi_model_video.py`
+
+Composes styled frames into video with crossfades and Gaussian pulsing.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--orig_dir` | Directory with original frames | required |
+| `--styled_udnie` | Udnie styled frames | required |
+| `--styled_mosaic` | Mosaic styled frames | optional |
+| `--styled_tenharmsel` | Tenharmsel styled frames | optional |
+| `--output` | Output video path | required |
+| `--styled_start` | First styled frame | 17 |
+| `--styled_end` | Last styled frame | 160 |
+| `--fps` | Output framerate | 24 |
+| `--size` | Output resolution | 1080 |
+| `--orig_blend` | Original image blend (0-1) | 0.4 |
+| `--crossfade_seconds` | Fade duration | 2.0 |
+| `--hold_frames` | Frames per source (8fps→24fps = 3) | 3 |
+
+**Blending behavior:**
+- Udnie is the base layer with weight ramping
+- Mosaic pulses in/out with 4 Gaussian pulses (max 50% blend)
+- Tenharmsel pulses in/out offset by 1/8 cycle (max 50% blend)
+- Creates dynamic interweaving of all three styles
+
+#### `scripts/style_all_weights.py`
+
+Batch style frames with all weight variants for a single model.
+
+```bash
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_all_weights.py \
+  --style udnie_strong \
+  --frame_start 17 --frame_end 160 \
+  --input_dir /project/frames \
+  --output_dir /project/styled_udnie
+```
+
+**Available style presets:**
+| Style | Weights |
+|-------|---------|
+| `udnie` | style1e10 - style9e10 (9 weights) |
+| `udnie_strong` | style5e10 - style9e10 (5 weights, stronger effect) |
+| `candy` | style1e10 - style9e10 (9 weights) |
+| `mosaic` | style5e10 only (1 weight) |
+| `tenharmsel` | style1e10 - style9e10 (9 weights) |
+| `tenharmsel_strong` | style5e10 - style9e10 (5 weights) |
+
+### Weight Ladder
+
+Models have weight variants from `style1e10` (subtle) to `style9e10` (strong):
+- `style1e10` - Very subtle, mostly original
+- `style5e10` - Medium strength
+- `style9e10` - Full style effect
+
+The video compositor ramps through weights over time for evolving intensity.
+
+### Output Structure
+
+```
+output/my_video/
+├── frames/                    # Extracted original frames
+│   ├── frame_0001_original.jpg
+│   ├── frame_0002_original.jpg
+│   └── ...
+├── styled_udnie/              # Udnie styled frames
+│   ├── frame_0017_original.jpg
+│   ├── frame_0017_udnie_style5e10.jpg
+│   ├── frame_0017_udnie_style6e10.jpg
+│   └── ...
+├── styled_mosaic/             # Mosaic styled frames
+│   └── ...
+├── styled_tenharmsel/         # Tenharmsel styled frames
+│   └── ...
+└── walk_*.json                # Weight walk files
+```
+
+### Walk Files
+
+Walk files control weight interpolation over time:
+```json
+{
+  "walk": [0, 0, 1, 1, 2, 2, 3, ...],
+  "weights": ["udnie_style5e10", "udnie_style6e10", ...],
+  "frame_start": 17,
+  "frame_end": 160
+}
+```
+
+### Example: Style 20s of a Portrait Video
+
+```bash
+# Mount your project directory
+docker compose run --rm -v /home/user/my_project:/project style bash
+
+# Inside container:
+# 1. Run full pipeline
+python3 /app/scripts/style_video_pipeline.py \
+  --video /project/videos/sunset.mp4 \
+  --output_dir /project/output \
+  --output_name sunset_styled \
+  --styled_start 17 --styled_end 160
+
+# 2. Compose video
+python3 /app/scripts/multi_model_video.py \
+  --orig_dir /project/output/sunset_styled/frames \
+  --styled_udnie /project/output/sunset_styled/styled_udnie \
+  --styled_mosaic /project/output/sunset_styled/styled_mosaic \
+  --styled_tenharmsel /project/output/sunset_styled/styled_tenharmsel \
+  --output /project/output/sunset_styled.mp4 \
+  --styled_start 17 --styled_end 160 \
+  --orig_blend 0.4 --crossfade_seconds 2.0
+```
+
+### Tips
+
+- **Skip tenharmsel** for faster processing: `--no_tenharmsel`
+- **Adjust blend**: Higher `--orig_blend` keeps more original detail (0.4 = 40% original)
+- **Longer crossfades**: Increase `--crossfade_seconds` for smoother transitions
+- **Portrait videos**: Script auto-detects and handles 9:16 aspect ratio
+- **Resume**: Existing styled frames are skipped, so you can resume interrupted runs
+
+## Style Morph - Cross-Image Weight Flow
+
+`scripts/style_morph.py` - Creates smooth morph videos from pre-styled images with flowing weight transitions across multiple style families.
+
+### Overview
+
+Given a directory of pre-styled images (with weight variants), Style Morph:
+1. Loads all available weight ladder images for each source image
+2. Interpolates smoothly through weight ladders using slow sine waves
+3. Blends multiple style families (candy, udnie, mosaic, rain_princess, tenharmsel) simultaneously
+4. Creates crossfade transitions between source images
+5. Applies subtle color filters for visual polish
+
+### Quick Start
+
+```bash
+# Basic usage - square output
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_morph.py \
+  --styled_dir /project/styled_images \
+  --output /project/output/morph.mp4
+
+# Portrait mode (keeps aspect ratio)
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_morph.py \
+  --styled_dir /project/styled_images \
+  --output /project/output/morph.mp4 \
+  --portrait
+
+# Specific style families only
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_morph.py \
+  --styled_dir /project/styled_images \
+  --output /project/output/morph.mp4 \
+  --families tenharmsel udnie
+
+# Higher original blend for more detail
+docker compose run --rm -v /path/to/project:/project style \
+  python3 /app/scripts/style_morph.py \
+  --styled_dir /project/styled_images \
+  --output /project/output/morph.mp4 \
+  --orig_blend 0.15
+```
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--styled_dir` | Directory with pre-styled images | required |
+| `--output` | Output video path | required |
+| `--frame_time` | Seconds per source image | 4.0 |
+| `--size` | Output resolution | 1080 |
+| `--fps` | Output framerate | 24 |
+| `--no_skip_first` | Include first image (normally skipped) | skip first |
+| `--portrait` | Portrait mode (maintain aspect ratio) | square crop |
+| `--orig_blend` | Original image blend amount (0-1) | 0.08 |
+| `--families` | Style families to use | all 5 |
+
+### Weight Ladders
+
+Each style family has a weight progression from subtle to intense:
+
+| Family | Weights |
+|--------|---------|
+| candy | candy → candy_style1e9 → ... → candy_style1e12 |
+| udnie | udnie → udnie_style1e9 → ... → udnie_style1e12 |
+| mosaic | mosaic → mosaic_style1e9 → ... → mosaic_style1e12 |
+| rain_princess | rain_princess → rain_princess_style1e9 → ... → rain_princess_style1e12 |
+| tenharmsel | tenharmsel_style1e9 → 2e9 → ... → 9e9 → 1e10 → ... → 1e12 (28 weights) |
+
+### Input Requirements
+
+Styled images directory should contain:
+```
+styled_dir/
+├── IMG_001_original.jpg
+├── IMG_001_candy.jpg
+├── IMG_001_candy_style1e9.jpg
+├── IMG_001_candy_style5e9.jpg
+├── ...
+├── IMG_001_tenharmsel_style1e9.jpg
+├── ...
+├── IMG_002_original.jpg
+├── IMG_002_candy.jpg
+└── ...
+```
+
+Use `lib/style_images.py` from NeuralStyleGoats or the batch styling scripts to generate these.
+
+### How It Works
+
+1. **Weight Trajectories**: Each style family's ladder position (0-1) drifts slowly using sine waves with different frequencies/phases
+2. **Style Blending**: All active styles are blended together with weights that also drift over time
+3. **Interpolation**: Within each ladder, adjacent weights are smoothstep-blended based on position
+4. **Crossfades**: 1.5-second crossfades between source images
+5. **Filters**: Random subtle filters (saturation, vibrance, warmth) applied per image
+
+### Example: Full Workflow
+
+```bash
+# 1. First, style your source images with all weights
+# (Using NeuralStyleGoats or batch scripts)
+
+# 2. Then create the morph video
+docker compose run --rm -v /home/user/project:/project style \
+  python3 /app/scripts/style_morph.py \
+  --styled_dir /project/output/tavian_full \
+  --output /project/output/videos/tavian_morph.mp4 \
+  --frame_time 4.0 \
+  --orig_blend 0.08 \
+  --families candy udnie mosaic tenharmsel
+
+# Output: ~1 minute video with smooth flowing style transitions
+```
+
+### Tips
+
+- **More original detail**: Increase `--orig_blend` to 0.15-0.25
+- **Single family**: Use `--families tenharmsel` for cleaner look
+- **Longer transitions**: Increase `--frame_time` to 6.0 or 8.0
+- **Portrait photos**: Use `--portrait` to avoid square cropping
+- **Skip problematic first image**: First image is skipped by default (often different lighting)

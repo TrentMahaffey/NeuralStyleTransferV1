@@ -1,0 +1,61 @@
+{
+  "name": "full_weight_ladder",
+  "description": "Apply all 69 style weight variants across 5 model families (candy, mosaic, udnie, rain_princess, tenharmsel) to a folder of images. Creates a complete weight progression from subtle (1e9) to intense (1e12) for each style.",
+  "script": "../NeuralStyleGoats/lib/style_images.py",
+  "created_from": "TavianBlueSlide",
+  "created_date": "2024-12-20",
+
+  "command": "python3 /home/trent-mahaffey/Dev/NeuralStyleGoats/lib/style_images.py --input_dir /path/to/images --output_dir /path/to/output",
+
+  "parameters": {
+    "required": {
+      "--input_dir": "Directory containing input images (.jpg, .JPG)",
+      "--output_dir": "Directory for styled output images"
+    },
+    "optional": {
+      "--scale": {"default": 1080, "description": "Output resolution (longest edge)"}
+    },
+    "fixed": {
+      "inference_res": 720,
+      "blend": 0.9,
+      "io_preset": "auto",
+      "device": "cuda"
+    }
+  },
+
+  "weight_ladder": {
+    "candy": ["candy", "candy_style1e9", "candy_style5e9", "candy_style1e10", "candy_style5e10", "candy_style1e11", "candy_style5e11", "candy_style1e12"],
+    "mosaic": ["mosaic", "mosaic_style1e9", "mosaic_style5e9", "mosaic_style1e10", "mosaic_style5e10", "mosaic_style1e11", "mosaic_style5e11", "mosaic_style1e12"],
+    "udnie": ["udnie", "udnie_style1e9", "udnie_style5e9", "udnie_style1e10", "udnie_style5e10", "udnie_style1e11", "udnie_style5e11", "udnie_style1e12"],
+    "rain_princess": ["rain_princess", "rain_princess_style1e9", "rain_princess_style5e9", "rain_princess_style1e10", "rain_princess_style5e10", "rain_princess_style1e11", "rain_princess_style5e11", "rain_princess_style1e12"],
+    "tenharmsel": ["tenharmsel_style1e9", "tenharmsel_style2e9", "tenharmsel_style3e9", "tenharmsel_style4e9", "tenharmsel_style5e9", "tenharmsel_style6e9", "tenharmsel_style7e9", "tenharmsel_style8e9", "tenharmsel_style9e9", "tenharmsel_style1e10", "tenharmsel_style2e10", "tenharmsel_style3e10", "tenharmsel_style4e10", "tenharmsel_style5e10", "tenharmsel_style6e10", "tenharmsel_style7e10", "tenharmsel_style8e10", "tenharmsel_style9e10", "tenharmsel_style1e11", "tenharmsel_style2e11", "tenharmsel_style3e11", "tenharmsel_style4e11", "tenharmsel_style5e11", "tenharmsel_style6e11", "tenharmsel_style7e11", "tenharmsel_style8e11", "tenharmsel_style9e11", "tenharmsel_style1e12"]
+    },
+  "total_weights": 69,
+
+  "example_commands": {
+    "basic": "python3 /home/trent-mahaffey/Dev/NeuralStyleGoats/lib/style_images.py --input_dir /path/to/photos --output_dir /path/to/styled",
+    "higher_res": "python3 /home/trent-mahaffey/Dev/NeuralStyleGoats/lib/style_images.py --input_dir /path/to/photos --output_dir /path/to/styled --scale 1440"
+  },
+
+  "output": {
+    "location": "<output_dir>/",
+    "naming": "<image_stem>_<weight>.jpg",
+    "files_per_image": 70,
+    "example_files": [
+      "IMG_3496_original.jpg",
+      "IMG_3496_candy.jpg",
+      "IMG_3496_candy_style1e9.jpg",
+      "IMG_3496_candy_style1e12.jpg",
+      "IMG_3496_tenharmsel_style5e10.jpg"
+    ]
+  },
+
+  "tips": [
+    "Takes ~5 minutes per image on GPU (69 style passes)",
+    "Skips existing outputs - safe to resume interrupted runs",
+    "Output naming: <image>_<model>_style<weight>.jpg",
+    "Weight progression: 1e9 (subtle) -> 5e9 -> 1e10 -> 5e10 -> 1e11 -> 5e11 -> 1e12 (intense)",
+    "Tenharmsel has finest granularity: 1e9 through 9e9, then 1e10 through 9e10, etc.",
+    "Use these outputs with style_morph.py for smooth weight-interpolated videos"
+  ]
+}

@@ -48,11 +48,68 @@ import numpy as np
 from PIL import Image
 
 # Available PyTorch neural style models
+# Note: Base models (candy, mosaic, rain_princess, udnie) use raw_255 io_preset.
+# NST_Train models use raw_01 io_preset - pipeline.py auto-detects architecture.
 PYTORCH_MODELS = [
+    # Base models (Johnson et al. architecture)
     'candy',
     'mosaic',
     'rain_princess',
     'udnie',
+    # NST_Train models (auto-detected, uses raw_01)
+    'candy_epoch_1',
+    'candy_epoch_2',
+    'candy_style1e9',
+    'candy_style1e10',
+    'candy_style1e11',
+    'candy_style1e12',
+    'candy_style5e9',
+    'candy_style5e10',
+    'candy_style5e11',
+    'mosaic_epoch_1',
+    'mosaic_epoch_2',
+    'mosaic_style1e9',
+    'mosaic_style1e10',
+    'mosaic_style1e11',
+    'mosaic_style1e12',
+    'mosaic_style5e9',
+    'mosaic_style5e10',
+    'mosaic_style5e11',
+    'rain_princess_epoch_1',
+    'rain_princess_epoch_2',
+    'rain_princess_style1e9',
+    'rain_princess_style1e10',
+    'rain_princess_style5e9',
+    'rain_princess_style5e10',
+    'tenharmsel_1_1e9',
+    'tenharmsel_1_1e10',
+    'tenharmsel_1_1e11',
+    'tenharmsel_1_1e12',
+    'tenharmsel_1_5e9',
+    'tenharmsel_1_5e10',
+    'tenharmsel_1_5e11',
+    'train_image_1',
+    'train_image_1_epoch_1',
+    'train_image_1_epoch_2',
+    'train_image_1_style1e10_content1e5',
+    'train_image_1_style1e11',
+    'train_image_1_style5e10',
+    'training_image',
+    'training_image_epoch_1',
+    'training_image_epoch_2',
+    'training_image_style1e10',
+    'training_image_style1e11',
+    'training_image_style5e10',
+    'training_image_2',
+    'training_image_2_epoch_1',
+    'training_image_2_epoch_2',
+    'training_image_2_style1e9',
+    'training_image_2_style1e10',
+    'training_image_2_style1e11',
+    'training_image_2_style1e12',
+    'training_image_2_style5e9',
+    'training_image_2_style5e10',
+    'training_image_2_style5e11',
 ]
 
 # Tile configurations (tile, overlap) with 12.5% overlap ratio
@@ -479,7 +536,7 @@ def extract_masked_region(image_path, mask_path, output_path, padding=0):
     return True
 
 
-def run_magenta_style(content_path, style_path, output_path, tile, overlap, scale=1440, blend=0.95):
+def run_magenta_style(content_path, style_path, output_path, tile, overlap, scale=1440, blend=0.95, gpu_memory_limit=32000):
     """Run Magenta arbitrary style transfer."""
     pipeline_path = Path(__file__).parent.parent / "pipeline.py"
 
@@ -493,6 +550,7 @@ def run_magenta_style(content_path, style_path, output_path, tile, overlap, scal
         "--magenta_overlap", str(overlap),
         "--scale", str(scale),
         "--blend", str(blend),
+        "--gpu_memory_limit", str(gpu_memory_limit),
     ]
 
     print(f"    tile={tile}, overlap={overlap}...")
@@ -505,7 +563,7 @@ def run_magenta_style(content_path, style_path, output_path, tile, overlap, scal
     return Path(output_path).exists()
 
 
-def run_pytorch_style(content_path, output_path, model_name=None, scale=720, blend=0.95, inference_res=1440):
+def run_pytorch_style(content_path, output_path, model_name=None, scale=720, blend=0.95, inference_res=1440, gpu_memory_limit=32000):
     """
     Run PyTorch neural style transfer on an image.
 
@@ -517,6 +575,7 @@ def run_pytorch_style(content_path, output_path, model_name=None, scale=720, ble
         scale: Output resolution (default 720)
         blend: Style blend ratio
         inference_res: Max inference resolution (pipeline.py handles downscale/upscale)
+        gpu_memory_limit: GPU memory limit in MB (default 32000 = 32GB)
 
     Returns:
         Tuple of (success, model_used)
@@ -539,6 +598,8 @@ def run_pytorch_style(content_path, output_path, model_name=None, scale=720, ble
         "--scale", str(scale),
         "--blend", str(blend),
         "--inference_res", str(inference_res),
+        "--device", "cuda",
+        "--gpu_memory_limit", str(gpu_memory_limit),
     ]
 
     print(f"[pytorch] Applying {model_name} style (scale={scale}, inference_res={inference_res})...")

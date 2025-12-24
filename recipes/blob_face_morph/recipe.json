@@ -1,0 +1,64 @@
+{
+  "name": "blob_face_morph",
+  "description": "Face detection with gaussian blob-blended style morphing. Detects faces, extracts crops, applies PyTorch + Magenta styling, creates zoom-out morph video with organic blob transitions between styles.",
+  "script": "scripts/morph_faces.py",
+  "created_from": "PhotoOfMe_faces_blob.mp4",
+  "created_date": "2024-12-21",
+
+  "command": "docker-compose run --rm style bash -lc \"python /app/scripts/morph_faces.py --image /app/input/YOUR_IMAGE.jpg --blob --vertical\"",
+
+  "parameters": {
+    "required": {
+      "--image": "Path to input image (e.g., /app/input/photo.jpg)"
+    },
+    "mode": {
+      "--blob": "Enable blob mode with gaussian-weighted blending (REQUIRED for this recipe)",
+      "--vertical": "Output vertical video 720x1280 (recommended for mobile)"
+    },
+    "blob_settings": {
+      "--num_blobs": {"default": 4, "description": "Number of blob regions (4-8 recommended)"},
+      "--blob_frequency": {"default": 2.5, "description": "Blob detail level (2-4 recommended)"},
+      "--blob_speed": {"default": 1.0, "description": "Blob animation speed multiplier"},
+      "--blob_feather": {"default": 0.3, "description": "Blob boundary softness (0.2-0.5 recommended)"}
+    },
+    "zoom_settings": {
+      "--min_zoom": {"default": 1.0, "description": "Ending zoom level (zoomed out)"},
+      "--max_zoom": {"default": 4.0, "description": "Starting zoom level (zoomed in on face)"},
+      "--morph_time": {"default": 0.5, "description": "Seconds per image transition in blob mode"}
+    },
+    "style_settings": {
+      "--scale": {"default": 1440, "description": "Resolution for styled images"},
+      "--blend": {"default": 0.95, "description": "Style blend ratio (0-1)"},
+      "--face_padding": {"default": 0.6, "description": "Padding around face crop (0.6 = 60%)"}
+    },
+    "output_settings": {
+      "--fps": {"default": 24, "description": "Video framerate"},
+      "--transition": {"default": 2.0, "description": "Seconds to crossfade between faces"}
+    }
+  },
+
+  "example_commands": {
+    "basic": "docker-compose run --rm style bash -lc \"python /app/scripts/morph_faces.py --image /app/input/photo.jpg --blob --vertical\"",
+    "more_blobs": "docker-compose run --rm style bash -lc \"python /app/scripts/morph_faces.py --image /app/input/photo.jpg --blob --vertical --num_blobs 6 --blob_feather 0.4\"",
+    "slower_animation": "docker-compose run --rm style bash -lc \"python /app/scripts/morph_faces.py --image /app/input/photo.jpg --blob --vertical --blob_speed 0.5 --morph_time 1.0\"",
+    "horizontal_video": "docker-compose run --rm style bash -lc \"python /app/scripts/morph_faces.py --image /app/input/photo.jpg --blob\""
+  },
+
+  "output": {
+    "location": "output/morph_faces/<image_name>/",
+    "files": {
+      "<name>_faces_blob.mp4": "Final morph video",
+      "<name>_faces_blob_run.json": "Run parameters log",
+      "styled/face<N>/": "Styled face crops for each detected face",
+      "work/": "Intermediate files (face crops, PyTorch pre-styles)"
+    }
+  },
+
+  "tips": [
+    "Works best with clear, well-lit faces at 3%+ of image area",
+    "Multiple faces will be processed sequentially with crossfades",
+    "Increase --blob_feather for softer, more organic transitions",
+    "Decrease --blob_speed for slower, dreamier animation",
+    "Use --max_zoom 6.0 for more dramatic zoom range"
+  ]
+}

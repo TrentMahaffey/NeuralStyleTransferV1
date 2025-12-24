@@ -4,6 +4,7 @@ import os, glob, shutil
 from pathlib import Path
 from typing import Optional, List
 import re
+import uuid
 
 import torch
 import torch.nn.functional as F
@@ -63,6 +64,34 @@ def _get_transformer_net():
             from transformer_net import TransformerNet
     return TransformerNet
 
+def _get_transformer_net_nst():
+    """Get NST_Train style TransformerNet (different architecture)."""
+    from transformer_net_nst import TransformerNet
+    return TransformerNet
+
+def _detect_transformer_type(checkpoint_path):
+    """Detect which TransformerNet architecture a checkpoint uses based on keys."""
+    state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+    keys = set(state_dict.keys())
+    # NST_Train uses 'down1.conv.weight', original uses 'conv1.conv2d.weight'
+    if any(k.startswith('down1.') for k in keys):
+        return 'nst'  # NST_Train architecture
+    return 'original'  # Johnson/original architecture
+
+def _load_transformer_model(checkpoint_path, device):
+    """Load transformer model with auto-detection of architecture."""
+    arch_type = _detect_transformer_type(checkpoint_path)
+    if arch_type == 'nst':
+        TransformerNet = _get_transformer_net_nst()
+        print(f"[model] Detected NST_Train architecture for {checkpoint_path}")
+    else:
+        TransformerNet = _get_transformer_net()
+        print(f"[model] Detected original architecture for {checkpoint_path}")
+    model = TransformerNet().to(device)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+    model.eval()
+    return model, arch_type
+
 try:
     import psutil
 except Exception:
@@ -88,19 +117,33 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 _MAGENTA_MODEL = None
 
 
+_TF_GPU_MEMORY_LIMIT_MB = 32000  # Default 32GB, can be set via set_gpu_memory_limit()
+
+def set_gpu_memory_limit(limit_mb: int):
+    """Set GPU memory limit for both TensorFlow and PyTorch."""
+    global _TF_GPU_MEMORY_LIMIT_MB
+    _TF_GPU_MEMORY_LIMIT_MB = limit_mb
+
 def _try_import_tf():
     global tf, hub
     try:
         import tensorflow as tf  # type: ignore
         import tensorflow_hub as hub  # type: ignore
-        # Disable TensorFlow GPU - Blackwell (compute capability 12.0) not supported yet
-        # TensorFlow's PTX JIT compilation fails with CUDA_ERROR_INVALID_PTX
-        # Force CPU mode (fast enough on multi-core CPUs, ~24 threads)
+        # NGC TensorFlow container has pre-compiled Blackwell (sm_120) kernels
         try:
-            tf.config.set_visible_devices([], 'GPU')
-            print("[magenta] TensorFlow GPU disabled (Blackwell not supported), using CPU")
-        except Exception:
-            pass  # May fail if no GPU present
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                # Set memory limit for each GPU
+                for gpu in gpus:
+                    tf.config.set_logical_device_configuration(
+                        gpu,
+                        [tf.config.LogicalDeviceConfiguration(memory_limit=_TF_GPU_MEMORY_LIMIT_MB)]
+                    )
+                print(f"[magenta] TensorFlow GPU enabled: {len(gpus)} GPU(s), memory limit: {_TF_GPU_MEMORY_LIMIT_MB}MB")
+            else:
+                print("[magenta] No GPU detected, using CPU")
+        except Exception as e:
+            print(f"[magenta] GPU setup warning: {e}")
         return tf, hub
     except Exception as e:
         print(f"[magenta][WARN] TensorFlow not available: {e}")
@@ -499,6 +542,13 @@ def style_frames(
 
     # Device + model
     device = torch.device(device_str)
+    # Set PyTorch GPU memory limit if using CUDA
+    if device_str == "cuda" and torch.cuda.is_available():
+        # Convert MB limit to fraction of total GPU memory
+        total_mem = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)  # in MB
+        fraction = min(1.0, _TF_GPU_MEMORY_LIMIT_MB / total_mem)
+        torch.cuda.set_per_process_memory_fraction(fraction)
+        print(f"[pytorch] GPU memory limit: {_TF_GPU_MEMORY_LIMIT_MB}MB ({fraction*100:.1f}% of {total_mem:.0f}MB)")
     print(f"[cfg] io_preset={io_preset}")
 
     def _load_checkpoint_compat(model, ckpt_path: str):
@@ -550,13 +600,25 @@ def style_frames(
                 print("[error] ReCoNet backend requested but lib.ReCoNet is not available. Ensure lib.py is on PYTHONPATH.")
                 sys.exit(2)
             model = _ReCoNet().to(device)
+            model_a_arch = 'reconet'
         else:
-            TransformerNet = _get_transformer_net()
+            # Auto-detect NST_Train vs original architecture
+            model_a_arch = _detect_transformer_type(str(model_path))
+            if model_a_arch == 'nst':
+                TransformerNet = _get_transformer_net_nst()
+                print(f"[model] Detected NST_Train architecture for {model_path}")
+                # Auto-switch to raw_01 for NST models if io_preset is auto/raw_255
+                if io_preset in ('auto', 'raw_255', 'imagenet_255'):
+                    print(f"[model] Auto-switching io_preset from '{io_preset}' to 'raw_01' for NST_Train model")
+                    io_preset = 'raw_01'
+                    args.io_preset = 'raw_01'
+            else:
+                TransformerNet = _get_transformer_net()
             model = TransformerNet().to(device)
         _load_checkpoint_compat(model, str(model_path))
         model.eval()
 
-    print(f"[backend] A: type={args.model_type} path={model_path if model_path else '(n/a)'}  device={device}")
+    print(f"[backend] A: type={args.model_type} path={model_path if model_path else '(n/a)'}  device={device}  arch={model_a_arch if 'model_a_arch' in dir() else 'n/a'}")
 
     # --- Model B ---
     model_b = None
@@ -1412,6 +1474,11 @@ def style_frames(
                             y = model(x_in).cpu()
                             print(f"[A][{idx}] y-range pre-denorm: ({float(y.min()):.3f}..{float(y.max()):.3f})")
                             out01 = (y / 255.0).clamp(0, 1).squeeze(0)
+                        elif io_preset == "raw_01":
+                            x_in = x_src01.to(device)
+                            y = model(x_in).cpu()
+                            print(f"[A][{idx}] y-range pre-denorm: ({float(y.min()):.3f}..{float(y.max()):.3f})")
+                            out01 = y.clamp(0, 1).squeeze(0)
                         else:
                             x_in = (x_src01 * 255.0).to(device)
                             y = model(x_in).cpu()
@@ -1529,6 +1596,12 @@ def style_frames(
                                 print(
                                     f"[{model_name}][{idx}] y-range pre-denorm: ({float(y.min()):.3f}..{float(y.max()):.3f})")
                                 out = (y / 255.0).clamp(0, 1).squeeze(0)
+                            elif io_preset == "raw_01":
+                                x_in = x_src01.to(device)
+                                y = model(x_in).cpu()
+                                print(
+                                    f"[{model_name}][{idx}] y-range pre-denorm: ({float(y.min()):.3f}..{float(y.max()):.3f})")
+                                out = y.clamp(0, 1).squeeze(0)
                             else:
                                 x_in = (x_src01 * 255.0).to(device)
                                 y = model(x_in).cpu()
@@ -2100,13 +2173,15 @@ def main():
     ap.add_argument("--stride", type=int, default=1, help="Process every Nth frame (2 = every other frame).")
     ap.add_argument("--max_frames", type=int, default=None, help="Limit number of frames for quick tests.")
     ap.add_argument("--device", choices=["cpu", "mps", "cuda"], default="cpu")
+    ap.add_argument("--gpu_memory_limit", type=int, default=32000,
+                    help="GPU memory limit in MB (default: 32000 = 32GB). Set lower to share GPU between processes.")
     ap.add_argument("--inference_res", type=int, default=0,
                     help="If >0, downscale the frame's long side to this before model inference, then upsample back for post-processing. Helps avoid OOM on very large images.")
 
     ap.add_argument("--io_preset",
-                    choices=["auto", "imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["auto", "imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default="auto",
-                    help="I/O preset for the primary model. Use 'auto' to pick based on backend: transformer->imagenet_255, torch7->caffe_bgr, magenta->imagenet_01, reconet->imagenet_01.")
+                    help="I/O preset for the primary model. Use 'auto' to pick based on backend: transformer->imagenet_255, torch7->caffe_bgr, magenta->imagenet_01, reconet->imagenet_01. Use 'raw_01' for models expecting 0-1 input/output.")
 
     ap.add_argument("--input_image", type=str, help="Path to a single input image.")
     ap.add_argument("--output_image", type=str, help="Path to a single output image.")
@@ -2169,7 +2244,7 @@ def main():
                     default=None,
                     help="Backend for the second model. Defaults to auto (.t7 -> torch7) or the same as --model_type.")
     ap.add_argument("--io_preset_b",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the second model (defaults to --io_preset).")
     ap.add_argument("--model_c", type=str, default=None, help="Path to third model checkpoint (.pth/.pt or .t7).")
@@ -2178,7 +2253,7 @@ def main():
                     default=None,
                     help="Backend for the third model. Defaults to auto (.t7 -> torch7) or same as --model_type.")
     ap.add_argument("--io_preset_c",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the third model (defaults to --io_preset).")
     ap.add_argument("--model_d", type=str, default=None, help="Path to fourth model checkpoint (.pth/.pt or .t7).")
@@ -2187,7 +2262,7 @@ def main():
                     default=None,
                     help="Backend for the fourth model. Defaults to auto (.t7 -> torch7) or same as --model_type.")
     ap.add_argument("--io_preset_d",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the fourth model (defaults to --io_preset).")
 
@@ -2198,7 +2273,7 @@ def main():
                     default=None,
                     help="Backend for the fifth model.")
     ap.add_argument("--io_preset_e",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the fifth model (defaults to --io_preset).")
     ap.add_argument("--magenta_style_e", type=str, default=None,
@@ -2211,7 +2286,7 @@ def main():
                     default=None,
                     help="Backend for the sixth model.")
     ap.add_argument("--io_preset_f",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the sixth model (defaults to --io_preset).")
     ap.add_argument("--magenta_style_f", type=str, default=None,
@@ -2224,7 +2299,7 @@ def main():
                     default=None,
                     help="Backend for the seventh model.")
     ap.add_argument("--io_preset_g",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the seventh model (defaults to --io_preset).")
     ap.add_argument("--magenta_style_g", type=str, default=None,
@@ -2237,7 +2312,7 @@ def main():
                     default=None,
                     help="Backend for the eighth model.")
     ap.add_argument("--io_preset_h",
-                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255"],
+                    choices=["imagenet_255", "imagenet_01", "tanh", "caffe_bgr", "raw_255", "raw_01"],
                     default=None,
                     help="I/O preset for the eighth model (defaults to --io_preset).")
     ap.add_argument("--magenta_style_h", type=str, default=None,
@@ -2331,8 +2406,13 @@ def main():
 
     ap.add_argument("--clean_frames", action="store_true",
                     help="Delete existing frame_*.{png|jpg} and styled_frame_*.{png|jpg} before extracting.")
+    ap.add_argument("--clean_work_dir", action="store_true", default=False,
+                    help="Remove the unique work directory after job completion (image modes only). Default: keep for debugging.")
 
     args = ap.parse_args()
+
+    # Set GPU memory limit early, before any model loading
+    set_gpu_memory_limit(args.gpu_memory_limit)
 
     def _parse_canvas(s: Optional[str]) -> Optional[tuple[int,int]]:
         if not s:
@@ -2392,7 +2472,15 @@ def main():
         if getattr(args, "flow_ema", False):
             print("[warn] --flow_ema ignored in image mode.")
 
-    work_dir = Path(args.work_dir).resolve()
+    # Use unique work directory per job to prevent cross-contamination
+    base_work_dir = Path(args.work_dir).resolve()
+    if image_mode_single or image_mode_batch:
+        # Create unique subdirectory for this job using short UUID
+        job_id = uuid.uuid4().hex[:8]
+        work_dir = base_work_dir / f"job_{job_id}"
+        print(f"[work_dir] Using isolated work directory: {work_dir}")
+    else:
+        work_dir = base_work_dir
     frames_dir = work_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2571,6 +2659,16 @@ def main():
         for p in frames_dir.glob("frame_*.jpg"): p.unlink(missing_ok=True)
         for p in frames_dir.glob("styled_frame_*.png"): p.unlink(missing_ok=True)
         for p in frames_dir.glob("styled_frame_*.jpg"): p.unlink(missing_ok=True)
+
+    # Optionally clean up unique work directory for image modes
+    if args.clean_work_dir and (image_mode_single or image_mode_batch) and work_dir != base_work_dir:
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            print(f"[cleanup] Removed isolated work directory: {work_dir}")
+        except Exception as e:
+            print(f"[cleanup][WARN] Could not remove work directory: {e}")
+    elif (image_mode_single or image_mode_batch) and work_dir != base_work_dir:
+        print(f"[work_dir] Kept isolated work directory (use --clean_work_dir to remove): {work_dir}")
 
 
 if __name__ == "__main__":

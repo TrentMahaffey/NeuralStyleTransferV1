@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: neural-style:gpu-cuda126
+    image: neural-style:ngc-tf25
     working_dir: /app
     command: >-
       bash -lc "bash /app/morph.sh"
@@ -33,7 +33,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: neural-style:gpu-cuda126
+    image: neural-style:ngc-tf25
     working_dir: /app
     command: >-
       bash -lc "pip install flask && python /app/web/app.py"

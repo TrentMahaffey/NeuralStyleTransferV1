@@ -11,6 +11,10 @@ venv/
 # Large model files
 models/deeplab/
 models/deeplab
+models/pytorch/*.pth
+models/tenharmsel/
+models/reconet/*.pth
+magenta_styles/
 
 # Work directories (frames, temp files)
 work/*
@@ -28,9 +32,15 @@ input_videos/*
 input_videos_old/
 !input_videos/.gitkeep
 
-# Input images (large)
+# Input images (large/personal)
 input/morph_images/*
 input/*.mp4
+input/*.jpg
+input/*.jpeg
+input/*.JPG
+input/*.JPEG
+input/*.png
+input/self_style_samples/
 
 # OS/editor
 .DS_Store
